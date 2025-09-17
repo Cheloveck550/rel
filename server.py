@@ -100,40 +100,38 @@ def subs_page(token: str):
         .btn:hover{{ opacity:.85; }}
         .muted{{ font-size:.9rem; color:var(--muted); margin-top:.5rem; }}
         pre{{ background:#0f172a; padding:.75rem; border-radius:.5rem; overflow-x:auto; }}
-    </style>
-        </head>
-        <body>
-          <div class="card">
-            <h1>Pro100VPN</h1>
-            <div class="status">
-              <p>Статус: {"<span class='ok'>Активна</span>" if active else "<span class='bad'>Неактивна</span>"}</p>
-              <p>Окончание: {exp_text}</p>
-            </div>
-            <a class="btn" href="{deeplink}">Открыть в HappVPN</a>
-            <button id="copyConfig" class="btn" style="background:#3b82f6;border:none;cursor:pointer;width:100%;">Копировать ссылку конфигурации</button>
-            <p class="muted">Если HappVPN не открывается, добавьте конфигурацию вручную:</p>
-            <pre id="cfg">{config_url}</pre>
-          </div>
-          <script>
-            document.getElementById("copyConfig").addEventListener("click", async () => {{
-              const text = document.getElementById("cfg").innerText;
-              try {{
-                await navigator.clipboard.writeText(text);
-                document.getElementById("copyConfig").innerText = "Скопировано!";
-                setTimeout(()=>document.getElementById("copyConfig").innerText = "Копировать ссылку конфигурации",1500);
-              }} catch (e) {{
-                alert("Не удалось скопировать. Скопируйте вручную:\\n" + text);
-              }}
-            }});
-          </script>
-        </body>
-        </html>
-        """
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h1>Pro100VPN</h1>
+        <div class="status">
+          <p>Статус: {"<span class='ok'>Активна</span>" if active else "<span class='bad'>Неактивна</span>"}</p>
+          <p>Окончание: {exp_text}</p>
+        </div>
+        <a class="btn" href="{deeplink}">Открыть в HappVPN</a>
+        <button id="copyConfig" class="btn" style="background:#3b82f6;border:none;cursor:pointer;width:100%;">Копировать ссылку конфигурации</button>
+        <p class="muted">Если HappVPN не открывается, добавьте конфигурацию вручную:</p>
+        <pre id="cfg">{config_url}</pre>
+      </div>
+      <script>
+        document.getElementById("copyConfig").addEventListener("click", async () => {{
+          const text = document.getElementById("cfg").innerText;
+          try {{
+            await navigator.clipboard.writeText(text);
+            document.getElementById("copyConfig").innerText = "Скопировано!";
+            setTimeout(()=>document.getElementById("copyConfig").innerText = "Копировать ссылку конфигурации",1500);
+          }} catch (e) {{
+            alert("Не удалось скопировать. Скопируйте вручную:\\n" + text);
+          }}
+        }});
+      </script>
+    </body>
+    </html>
+    """
     return HTMLResponse(content=html)
 
-
 # ===================== ТЕСТ =====================
-if name == "main":
+if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
