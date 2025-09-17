@@ -1,23 +1,13 @@
 #!/bin/bash
 set -e
 
-# === Настройки под твой сервер ===
-UUID="4f09a57e-76c7-497c-a878-db737cd6a5b5"
-SNI="www.cloudflare.com"
-DEST="www.cloudflare.com:443"
-PRIVATE_KEY="ВСТАВЬ_СЮДА_СВОЙ_PRIVATE_KEY"
-SHORT_ID="bb45e9b132a66a07"
+echo "[*] Чиним XRay конфиг и запускаем сервис..."
 
-CONFIG_PATH="/usr/local/etc/xray/config.json"
+# Создаём папку, если её нет
+mkdir -p /usr/local/etc/xray
 
-echo "[1/4] Делаем резервную копию старого config.json..."
-if [ -f "$CONFIG_PATH" ]; then
-    cp "$CONFIG_PATH" "$CONFIG_PATH.bak_$(date +%F_%T)"
-    echo "✅ Резервная копия сохранена: $CONFIG_PATH.bak_$(date +%F_%T)"
-fi
-
-echo "[2/4] Перезаписываем новый config.json..."
-cat > $CONFIG_PATH <<EOF
+# Пишем новый конфиг
+cat > /usr/local/etc/xray/config.json <<EOF
 {
   "inbounds": [
     {
@@ -26,7 +16,7 @@ cat > $CONFIG_PATH <<EOF
       "settings": {
         "clients": [
           {
-            "id": "$UUID",
+            "id": "4f09a57e-76c7-497c-a878-db737cd6a5b5",
             "flow": ""
           }
         ],
@@ -37,29 +27,33 @@ cat > $CONFIG_PATH <<EOF
         "security": "reality",
         "realitySettings": {
           "show": false,
-          "dest": "$DEST",
+          "dest": "www.cloudflare.com:443",
           "xver": 0,
-          "serverNames": [ "$SNI" ],
-          "privateKey": "$PRIVATE_KEY",
-          "shortIds": [ "$SHORT_ID" ]
+          "serverNames": [
+            "www.cloudflare.com"
+          ],
+          "privateKey": "4CRoGnZdT15MMRx81RzXAieoa1HHzLXUnvClo10q1mQ",
+          "shortIds": [
+            "sLeXmgrNQDKmyM-2Bf1f6_qek30XVQMqALy1B0bHVp4"
+          ]
         }
       }
     }
   ],
   "outbounds": [
     {
-      "protocol": "freedom",
-      "settings": {}
+      "protocol": "freedom"
     }
   ]
 }
 EOF
 
-echo "[3/4] Проверяем синтаксис JSON..."
-jq . $CONFIG_PATH > /dev/null
-echo "✅ JSON корректный!"
+echo "[*] Проверяем конфиг..."
+/usr/local/bin/xray run -test -config /usr/local/etc/xray/config.json
 
-echo "[4/4] Перезапускаем XRay..."
+echo "[*] Перезапускаем XRay..."
 systemctl restart xray
-sleep 2
+systemctl enable xray
+
+echo "[+] XRay перезапущен успешно!"
 systemctl status xray --no-pager
