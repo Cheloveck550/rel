@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 import random
 import string
@@ -10,7 +10,7 @@ app = FastAPI()
 # Константы для конфигурации VLESS+Reality
 CLIENT_UUID = "4f09a57e-76c7-497c-a878-db737cd6a5b5"
 REALITY_PUBLIC_KEY = "jrw_17a0eN01fEvg14NVze2iPF2ddpgdDwU_Y90-TEA"
-REALITY_SHORT_ID = "bb45e9b132a66a07"  # Исправляем на shortId!
+REALITY_SHORT_ID = "bb45e9b132a66a07"
 SERVER_IP = "193.58.122.47"
 
 
@@ -52,7 +52,6 @@ async def home(request: Request):
     return HTMLResponse(content=html_content)
 
 
-# ДОБАВЛЯЕМ ЭТОТ РОУТ!
 @app.get("/subs/{token}", response_class=HTMLResponse)
 async def subs_page(token: str):
     html_content = f"""
@@ -80,9 +79,10 @@ async def subs_page(token: str):
     return HTMLResponse(content=html_content)
 
 
-@app.get("/configs/{token}.json")
+# ИСПРАВЛЯЕМ ЭТОТ РОУТ - возвращаем PlainTextResponse с Base64!
+@app.get("/configs/{token}.json", response_class=PlainTextResponse)
 async def get_config(token: str):
-    # Генерируем VLESS ссылку в формате Base64
+    # Генерируем VLESS ссылку
     vless_link = (
         f"vless://{CLIENT_UUID}@{SERVER_IP}:443"
         f"?encryption=none&security=reality&fp=chrome"
@@ -90,13 +90,12 @@ async def get_config(token: str):
         f"#Pro100VPN"
     )
     
-    # Кодируем в Base64
+    # Кодируем в Base64 (HappVPN ожидает именно это!)
     subscription = base64.b64encode(vless_link.encode()).decode()
     
     return subscription
 
 
-# ДОБАВЛЯЕМ ЭТОТ РОУТ ДЛЯ ПРОВЕРКИ!
 @app.get("/test")
 async def test():
     return {"status": "ok", "message": "Server is working!"}
