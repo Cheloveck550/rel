@@ -28,7 +28,7 @@ VLESS_UUID = os.environ.get("PRO100VPN_VLESS_UUID", "4f09a57e-76c7-497c-a878-db7
 
 # Reality keys (те, что ты сгенерировал)
 REALITY_PUBLIC_KEY = os.environ.get("PRO100VPN_REALITY_PUBKEY", "jrw_17a0eN01fEvg14NVze2iPF2ddpgdDwU_Y90-TEA")
-REALITY_SHORT_ID = os.environ.get("PRO100VPN_REALITY_SHORTID", "sLeXmgrNQDKmyM-2Bf1f6_qek30XVQMqALy1B0bHVp4")
+REALITY_SHORT_ID = os.environ.get("PRO100VPN_REALITY_SHORTID", "09abf7341e035c7d")
 REALITY_SNI = os.environ.get("PRO100VPN_REALITY_SNI", "www.cloudflare.com")
 
 CLEANUP_INTERVAL = 300  # фон. задача — чистка (сек)
@@ -250,3 +250,4 @@ async def health():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("server:app", host="0.0.0.0", port=8000)
+
