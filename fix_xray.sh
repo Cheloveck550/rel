@@ -11,7 +11,7 @@ cat > /usr/local/etc/xray/config.json <<EOF
 {
   "inbounds": [
     {
-      "port": 443,
+      "port": 8443,
       "protocol": "vless",
       "settings": {
         "clients": [
@@ -57,3 +57,4 @@ systemctl enable xray
 
 echo "[+] XRay перезапущен успешно!"
 systemctl status xray --no-pager
+
