@@ -3,10 +3,8 @@ set -e
 
 echo "[*] Чиним XRay конфиг и запускаем сервис..."
 
-# Создаём папку, если её нет
 mkdir -p /usr/local/etc/xray
 
-# Пишем новый конфиг
 cat > /usr/local/etc/xray/config.json <<EOF
 {
   "inbounds": [
@@ -57,4 +55,3 @@ systemctl enable xray
 
 echo "[+] XRay перезапущен успешно!"
 systemctl status xray --no-pager
-
