@@ -32,7 +32,7 @@ cat > /usr/local/etc/xray/config.json <<EOF
           ],
           "privateKey": "4CRoGnZdT15MMRx81RzXAieoa1HHzLXUnvClo10q1mQ",
           "shortIds": [
-            "sLeXmgrNQDKmyM-2Bf1f6_qek30XVQMqALy1B0bHVp4"
+            "09abf7341e035c7d"
           ]
         }
       }
@@ -55,3 +55,4 @@ systemctl enable xray
 
 echo "[+] XRay перезапущен успешно!"
 systemctl status xray --no-pager
+
