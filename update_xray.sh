@@ -9,6 +9,8 @@ SHORTID="ba4211bb433df45d"
 SNI="www.google.com"
 XRAY_PORT=443
 
+install -d -m 0755 /usr/local/etc/xray /etc/xray /var/log/xray
+
 cat >/usr/local/etc/xray/config.json <<EOF
 {
   "log": {
@@ -20,10 +22,7 @@ cat >/usr/local/etc/xray/config.json <<EOF
     "port": ${XRAY_PORT},
     "protocol": "vless",
     "settings": {
-      "clients": [{
-        "id": "${UUID}",
-        "flow": "xtls-rprx-vision"
-      }],
+      "clients": [{ "id": "${UUID}", "flow": "xtls-rprx-vision" }],
       "decryption": "none"
     },
     "streamSettings": {
@@ -37,21 +36,24 @@ cat >/usr/local/etc/xray/config.json <<EOF
         "shortIds": ["${SHORTID}"]
       }
     },
-    "sniffing": {
-      "enabled": true,
-      "destOverride": ["http", "tls"]
-    }
+    "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
   }],
   "outbounds": [
-    { "protocol": "freedom" },
-    { "protocol": "blackhole" }
+    { "protocol": "freedom", "tag": "direct" },
+    { "protocol": "blackhole", "tag": "block" }
   ]
 }
 EOF
 
+# env для server.py
+cat >/etc/xray/reality.env <<EOF
+DOMAIN=${DOMAIN}
+UUID=${UUID}
+PUBKEY=${PUBKEY}
+SHORTID=${SHORTID}
+SNI=${SNI}
+XRAY_PORT=${XRAY_PORT}
+EOF
+
 systemctl restart xray
-echo "✅ Xray config обновлён и перезапущен!"
-echo "UUID: ${UUID}"
-echo "PublicKey: ${PUBKEY}"
-echo "ShortID: ${SHORTID}"
-echo "SNI: ${SNI}"
+echo "✅ Xray перезапущен. Параметры Reality сохранены в /etc/xray/reality.env"
