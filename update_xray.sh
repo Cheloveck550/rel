@@ -9,15 +9,9 @@ SHORTID="ba4211bb433df45d"
 SNI="www.google.com"
 XRAY_PORT=443
 
-install -d -m 755 /usr/local/etc/xray /etc/xray
-
 cat >/usr/local/etc/xray/config.json <<EOF
 {
-  "log": {
-    "access": "/var/log/xray/access.log",
-    "error": "/var/log/xray/error.log",
-    "loglevel": "warning"
-  },
+  "log": { "access": "/var/log/xray/access.log", "error": "/var/log/xray/error.log", "loglevel": "warning" },
   "inbounds": [{
     "port": ${XRAY_PORT},
     "protocol": "vless",
@@ -38,25 +32,9 @@ cat >/usr/local/etc/xray/config.json <<EOF
     },
     "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
   }],
-  "outbounds": [
-    { "protocol": "freedom", "tag": "direct" },
-    { "protocol": "blackhole", "tag": "block" }
-  ]
+  "outbounds": [{ "protocol": "freedom" }, { "protocol": "blackhole" }]
 }
 EOF
 
-cat >/etc/xray/reality.env <<EOF
-DOMAIN=${DOMAIN}
-UUID=${UUID}
-PUBKEY=${PUBKEY}
-SHORTID=${SHORTID}
-SNI=${SNI}
-XRAY_PORT=${XRAY_PORT}
-EOF
-
 systemctl restart xray
-echo "✅ Xray обновлён. Проверь: systemctl status xray"
-echo "UUID=${UUID}"
-echo "PublicKey=${PUBKEY}"
-echo "ShortID=${SHORTID}"
-echo "SNI=${SNI}"
+echo "✅ Xray config обновлён!"
