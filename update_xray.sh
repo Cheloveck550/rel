@@ -9,7 +9,7 @@ SHORTID="ba4211bb433df45d"
 SNI="www.google.com"
 XRAY_PORT=443
 
-install -d -m 0755 /usr/local/etc/xray /etc/xray /var/log/xray
+install -d -m 755 /usr/local/etc/xray /etc/xray
 
 cat >/usr/local/etc/xray/config.json <<EOF
 {
@@ -45,7 +45,6 @@ cat >/usr/local/etc/xray/config.json <<EOF
 }
 EOF
 
-# env для server.py
 cat >/etc/xray/reality.env <<EOF
 DOMAIN=${DOMAIN}
 UUID=${UUID}
@@ -56,4 +55,8 @@ XRAY_PORT=${XRAY_PORT}
 EOF
 
 systemctl restart xray
-echo "✅ Xray перезапущен. Параметры Reality сохранены в /etc/xray/reality.env"
+echo "✅ Xray обновлён. Проверь: systemctl status xray"
+echo "UUID=${UUID}"
+echo "PublicKey=${PUBKEY}"
+echo "ShortID=${SHORTID}"
+echo "SNI=${SNI}"
