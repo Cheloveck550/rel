@@ -6,12 +6,6 @@ app = FastAPI()
 
 DB_FILE = "/root/rel/bot_database.db"
 SERVER_IP = "64.188.64.214"  # твой сервер
-SERVER_PORT = 443
-SNI = "www.google.com"
-
-# 🔑 ключи для reality
-PUBLIC_KEY = "m7n-24tmvfTdp2-Szr-vAaM3t9NzGDpTNrva6xM6-ls"
-SHORT_ID = "ba4211bb433df45d"
 
 
 def db_connect():
@@ -32,7 +26,7 @@ def get_vpn_link(user_id: int) -> str:
 @app.get("/sub/{token}", response_class=PlainTextResponse)
 def sub_link(token: str):
     """
-    Отдаёт VLESS ссылку в виде текста (для отладки/прямой проверки)
+    Отдаёт VLESS ссылку в виде текста (для HappVPN и отладки)
     """
     conn = db_connect()
     cursor = conn.cursor()
@@ -54,7 +48,7 @@ def sub_link(token: str):
 @app.get("/subs/{token}", response_class=HTMLResponse)
 def subs_page(token: str):
     """
-    HTML-страница с кнопкой для открытия HappVPN
+    HTML-страница с кнопкой, которая сразу открывает HappVPN
     """
     conn = db_connect()
     cursor = conn.cursor()
@@ -65,10 +59,8 @@ def subs_page(token: str):
     if not row:
         raise HTTPException(status_code=404, detail="Subscription not found")
 
-    user_id = row[0]
-    vpn_link = get_vpn_link(user_id)
-    if not vpn_link:
-        raise HTTPException(status_code=404, detail="VPN link not found for this user")
+    # генерим deeplink для HappVPN
+    happ_link = f"happ://add/http://{SERVER_IP}/sub/{token}"
 
     html = f"""
     <html>
@@ -78,7 +70,7 @@ def subs_page(token: str):
         <body style="text-align:center; font-family:Arial">
             <h2>Подписка Pro100VPN</h2>
             <p>Нажмите кнопку ниже, чтобы добавить сервер в HappVPN:</p>
-            <a href="{vpn_link}">
+            <a href="{happ_link}">
                 <button style="padding:10px 20px; font-size:16px;">Добавить в HappVPN</button>
             </a>
         </body>
