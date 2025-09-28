@@ -1,15 +1,13 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -e
 
-# Папка под конфиг
-sudo mkdir -p /usr/local/etc/xray
+CONFIG_PATH="/usr/local/etc/xray/config.json"
 
-# Записываем config.json
-sudo tee /usr/local/etc/xray/config.json > /dev/null <<EOF
+echo "📂 Создаём новый config.json для Xray..."
+
+cat > $CONFIG_PATH <<EOF
 {
   "log": {
-    "access": "/var/log/xray/access.log",
-    "error": "/var/log/xray/error.log",
     "loglevel": "warning"
   },
   "inbounds": [
@@ -20,7 +18,8 @@ sudo tee /usr/local/etc/xray/config.json > /dev/null <<EOF
         "clients": [
           {
             "id": "29e9cdce-dff1-49f4-b94b-b26fa32a9a6b",
-            "flow": "xtls-rprx-vision"
+            "flow": "xtls-rprx-vision",
+            "encryption": "none"
           }
         ],
         "decryption": "none"
@@ -29,28 +28,50 @@ sudo tee /usr/local/etc/xray/config.json > /dev/null <<EOF
         "network": "tcp",
         "security": "reality",
         "realitySettings": {
-          "show": false,
           "dest": "www.google.com:443",
-          "serverNames": ["www.google.com"],
-          "privateKey": "iEtW0aEEXGlQsJ4gD962DeUNx0L7NWBuhPBlUVB1XfGU",
-          "shortIds": ["ba4211bb433df45d"]
+          "serverNames": [
+            "www.google.com"
+          ],
+          "privateKey": "-N0J53N3H9YhAJsha7SPjhG4culuTm3BABpE5CcdJWs",
+          "shortIds": [
+            "ba4211bb433df45d"
+          ]
         }
       },
       "sniffing": {
         "enabled": true,
-        "destOverride": ["http", "tls"]
+        "destOverride": [
+          "http",
+          "tls"
+        ]
       }
     }
   ],
   "outbounds": [
-    { "protocol": "freedom" },
-    { "protocol": "blackhole" }
+    {
+      "protocol": "freedom"
+    },
+    {
+      "protocol": "blackhole"
+    }
   ]
 }
 EOF
 
-# Перезапускаем Xray
-sudo systemctl restart xray
+echo "✅ Конфиг записан в $CONFIG_PATH"
 
-echo "✅ Конфиг записан и Xray перезапущен!"
-sudo systemctl status xray --no-pager | head -n 10
+echo "🔎 Проверяем синтаксис JSON..."
+if ! jq . $CONFIG_PATH > /dev/null 2>&1; then
+  echo "❌ Ошибка: config.json некорректный!"
+  exit 1
+fi
+echo "✅ JSON корректный"
+
+echo "🔄 Перезапускаем Xray..."
+systemctl restart xray
+
+sleep 2
+systemctl status xray --no-pager -l | head -n 20
+
+echo "🔍 Проверяем, слушает ли Xray порт 443..."
+ss -tlnp | grep 443 || echo "⚠️ Порт 443 не найден!"
