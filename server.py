@@ -9,6 +9,10 @@ SERVER_IP = "64.188.64.214"  # IP твоего сервера
 SERVER_PORT = 443
 SNI = "www.google.com"
 
+# 🔑 Твои постоянные ключи сервера
+PUBLIC_KEY = "m7n-24tmvfTdp2-Szr-vAaM3t9NzGDpTNrva6xM6-ls"
+SHORT_ID = "ba4211bb433df45d"
+
 def db_connect():
     return sqlite3.connect(DB_FILE)
 
@@ -20,20 +24,20 @@ def get_subscription(token: str):
     """
     conn = db_connect()
     cursor = conn.cursor()
-    cursor.execute("SELECT uuid, public_key, short_id FROM subscriptions WHERE token=?", (token,))
+    cursor.execute("SELECT uuid FROM subscriptions WHERE token=?", (token,))
     row = cursor.fetchone()
     conn.close()
 
     if not row:
         raise HTTPException(status_code=404, detail="Subscription not found")
 
-    uuid, public_key, short_id = row
+    uuid = row[0]
 
     # Формируем VLESS Reality ссылку
     link = (
         f"vless://{uuid}@{SERVER_IP}:{SERVER_PORT}?"
-        f"type=tcp&security=reality&pbk={public_key}"
-        f"&sni={SNI}&flow=xtls-rprx-vision&sid={short_id}#Pro100VPN"
+        f"type=tcp&security=reality&pbk={PUBLIC_KEY}"
+        f"&sni={SNI}&flow=xtls-rprx-vision&sid={SHORT_ID}#Pro100VPN"
     )
     return link
 
