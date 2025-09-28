@@ -1,79 +1,74 @@
+import aiosqlite
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, PlainTextResponse
-import sqlite3
+from fastapi.responses import HTMLResponse
 
 app = FastAPI()
 
-DB_FILE = "/root/rel/bot_database.db"
-SERVER_IP = "64.188.64.214"  # твой сервер
+# ==================== Конфигурация ====================
+DOMAIN = "64.188.64.214"   # IP сервера
+PORT = 443                 # Порт Xray
+USER_ID = "29e9cdce-dff1-49f4-b94b-b26fa32a9a6b"  # UUID клиента
+SNI = "www.google.com"     # Серверное имя
+SHORT_ID = "ba4211bb433df45d"  # shortId из config.json
+PUBLIC_KEY = "m7n-24tMvfTdp2-2sr-vAaM3t9NzGDpTNrva6xM6-ls"
 
 
-def db_connect():
-    return sqlite3.connect(DB_FILE)
-
-
-def get_vpn_link(user_id: int) -> str:
-    conn = db_connect()
-    cursor = conn.cursor()
-    cursor.execute("SELECT vpn_link FROM vpn_links WHERE user_id=?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    if not row:
-        return None
-    return row[0]
-
-
-@app.get("/sub/{token}", response_class=PlainTextResponse)
-def sub_link(token: str):
+# ==================== Генератор ссылки ====================
+def generate_vless_link(token: str) -> str:
     """
-    Отдаёт VLESS ссылку в виде текста (для HappVPN и отладки)
+    Генерирует VLESS ссылку для HappVPN
     """
-    conn = db_connect()
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM subscriptions WHERE token=?", (token,))
-    row = cursor.fetchone()
-    conn.close()
+    vless_url = (
+        f"vless://{USER_ID}@{DOMAIN}:{PORT}"
+        f"?encryption=none"
+        f"&security=reality"
+        f"&flow=xtls-rprx-vision"
+        f"&sni={SNI}"
+        f"&fp=chrome"
+        f"&pbk={PUBLIC_KEY}"
+        f"&sid={SHORT_ID}"
+        f"&type=tcp"
+        f"&headerType=none"
+        f"#{DOMAIN}-Pro100VPN"
+    )
+    # HappVPN требует обёртку
+    return f"happ://add/{vless_url}"
 
-    if not row:
-        raise HTTPException(status_code=404, detail="Subscription not found")
-
-    user_id = row[0]
-    vpn_link = get_vpn_link(user_id)
-    if not vpn_link:
-        raise HTTPException(status_code=404, detail="VPN link not found for this user")
-
-    return vpn_link
-
-
+# ==================== Роуты ====================
 @app.get("/subs/{token}", response_class=HTMLResponse)
-def subs_page(token: str):
+async def subscription_page(token: str):
     """
-    HTML-страница с кнопкой, которая сразу открывает HappVPN
+    Страница с кнопкой "Добавить в HappVPN"
     """
-    conn = db_connect()
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM subscriptions WHERE token=?", (token,))
-    row = cursor.fetchone()
-    conn.close()
+    async with aiosqlite.connect("bot_database.db") as db:
+        cursor = await db.execute("SELECT 1 FROM subscriptions WHERE token=?", (token,))
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Подписка не найдена")
 
-    if not row:
-        raise HTTPException(status_code=404, detail="Subscription not found")
-
-    # генерим deeplink для HappVPN
-    happ_link = f"happ://add/http://{SERVER_IP}/sub/{token}"
+    link = generate_vless_link(token)
 
     html = f"""
     <html>
-        <head>
-            <title>VPN подписка</title>
-        </head>
-        <body style="text-align:center; font-family:Arial">
-            <h2>Подписка Pro100VPN</h2>
-            <p>Нажмите кнопку ниже, чтобы добавить сервер в HappVPN:</p>
-            <a href="{happ_link}">
-                <button style="padding:10px 20px; font-size:16px;">Добавить в HappVPN</button>
-            </a>
-        </body>
+    <head><title>Подписка Pro100VPN</title></head>
+    <body style="font-family:Arial; text-align:center; margin-top:50px;">
+        <h2>Подписка Pro100VPN</h2>
+        <p>Нажмите кнопку ниже, чтобы добавить сервер в HappVPN:</p>
+        <a href="{link}">
+            <button style="padding:10px 20px; font-size:16px;">Добавить в HappVPN</button>
+        </a>
+    </body>
     </html>
     """
-    return html
+    return HTMLResponse(content=html)
+
+@app.get("/sub/{token}")
+async def get_vless(token: str):
+    """
+    API для получения чистой VLESS ссылки
+    """
+    async with aiosqlite.connect("bot_database.db") as db:
+        cursor = await db.execute("SELECT 1 FROM subscriptions WHERE token=?", (token,))
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404, detail="VPN link not found for this user")
+
+    return {"link": generate_vless_link(token)}
