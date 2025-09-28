@@ -3,6 +3,7 @@ import logging
 import secrets
 import uuid
 from decimal import Decimal
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -10,8 +11,10 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
+
 from aiocryptopay import AioCryptoPay, Networks
 from yoomoney import Quickpay, Client
+
 import aiosqlite
 from datetime import datetime, timezone, timedelta
 
@@ -27,6 +30,13 @@ YOOMONEY_FEE_PERCENT = 0.05    # 5% комиссия YooMoney
 VPN_SUBSCRIPTION_PRICE = 100   # Цена подписки в рублях
 
 DOMAIN = "64.188.64.214"       # для ссылок вида http://<DOMAIN>/subs/<token>
+
+# Ключи сервера для формирования ссылки vless (PUBLIC KEY и SHORT ID)
+PUBLIC_KEY = "m7n-24tmvfTdp2-Szr-vAaM3t9NzGDpTNrva6xM6-ls"
+SHORT_ID   = "ba4211bb433df45d"
+
+DB_PATH = "bot_database.db"             # локально рядом с main.py
+DB_ABS  = "/root/rel/bot_database.db"   # для server.py используем абсолютный путь
 
 # ---------- Инициализация бота и провайдеров ----------
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
@@ -45,7 +55,7 @@ class PaymentState(StatesGroup):
 
 # =================== Инициализация БД ===================
 async def init_db():
-    async with aiosqlite.connect('bot_database.db') as db:
+    async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -89,6 +99,14 @@ async def init_db():
                 traffic_limit_gb REAL
             )
         ''')
+        # таблица, которую читает server.py для выдачи ссылки HappVPN
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS vpn_links (
+                user_id INTEGER PRIMARY KEY,
+                vpn_link TEXT,
+                expires_at DATETIME
+            )
+        ''')
         await db.commit()
 
 # ===================== Клавиатуры =====================
@@ -123,10 +141,28 @@ def back_to_payment_methods_keyboard():
 
 # =================== Вспомогательные ===================
 async def get_user_balance(user_id: int) -> float:
-    async with aiosqlite.connect('bot_database.db') as db:
+    async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute('SELECT balance FROM users WHERE user_id = ?', (user_id,))
         result = await cursor.fetchone()
         return result[0] if result else 0.0
+
+async def add_vpn_link(user_id: int, user_uuid: str):
+    """
+    Создаёт/обновляет для пользователя готовую VLESS ссылку в таблице vpn_links.
+    """
+    expires_at = (datetime.utcnow() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+    vpn_link = (
+        f"vless://{user_uuid}@{DOMAIN}:443?"
+        f"type=tcp&security=reality&pbk={PUBLIC_KEY}"
+        f"&sni=www.google.com&flow=xtls-rprx-vision&sid={SHORT_ID}#Pro100VPN"
+    )
+    async with aiosqlite.connect(DB_PATH) as db:
+        # один пользователь — одна активная ссылка (обновляем)
+        await db.execute(
+            "INSERT OR REPLACE INTO vpn_links (user_id, vpn_link, expires_at) VALUES (?, ?, ?)",
+            (user_id, vpn_link, expires_at)
+        )
+        await db.commit()
 
 # ======================== Хэндлеры ========================
 @dp.message(Command("start"))
@@ -141,7 +177,7 @@ async def cmd_start(message: types.Message):
         except ValueError:
             referrer_id = None
 
-    async with aiosqlite.connect('bot_database.db') as db:
+    async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)', (user_id, username))
         if referrer_id and referrer_id != user_id:
             cursor = await db.execute('SELECT 1 FROM users WHERE user_id = ?', (referrer_id,))
@@ -190,7 +226,7 @@ async def process_cryptopay_payment(message: types.Message, state: FSMContext):
             swap_to="USDT"
         )
 
-        await state.update_data(amount=float(amount), invoice_id=invoice.invoice_id, attempts=0)
+        await state.update_data(amount=float(amount), invoice_id=getattr(invoice, 'invoice_id', None), attempts=0)
 
         pay_url = getattr(invoice, 'bot_invoice_url', None) or getattr(invoice, 'pay_url', None) or getattr(invoice, 'url', None)
 
@@ -236,7 +272,7 @@ async def check_cryptobot_payment(callback: types.CallbackQuery, state: FSMConte
 
         if status == "paid":
             user_id = callback.from_user.id
-            async with aiosqlite.connect('bot_database.db') as db:
+            async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (float(amount), user_id))
                 await db.execute('INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, ?, ?)',
                                  (user_id, float(amount), 'deposit', 'Пополнение через CryptoBot'))
@@ -334,7 +370,7 @@ async def check_yoomoney_payment(callback: types.CallbackQuery, state: FSMContex
         if operation_found:
             amount = float(data.get("amount") or 0)
             user_id = callback.from_user.id
-            async with aiosqlite.connect('bot_database.db') as db:
+            async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (amount, user_id))
                 await db.execute('INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, ?, ?)',
                                  (user_id, amount, 'deposit', 'Пополнение через YooMoney'))
@@ -379,7 +415,7 @@ async def buy_vpn(callback: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "confirm_vpn", PaymentState.waiting_for_vpn_confirmation)
 async def happvpn_purchase(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
-    async with aiosqlite.connect('bot_database.db') as db:
+    async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute('SELECT balance FROM users WHERE user_id = ?', (user_id,))
         row = await cursor.fetchone()
         balance = row[0] if row else 0.0
@@ -407,6 +443,10 @@ async def happvpn_purchase(callback: types.CallbackQuery, state: FSMContext):
                          (user_id, -VPN_SUBSCRIPTION_PRICE, 'vpn', 'Покупка HappVPN'))
         await db.commit()
 
+    # генерируем UUID и создаём/обновляем vpn_link
+    user_uuid = str(uuid.uuid4())
+    await add_vpn_link(user_id, user_uuid)
+
     deeplink = f"http://{DOMAIN}/subs/{token}"
     kb = InlineKeyboardBuilder()
     kb.button(text="Добавить в HappVPN", url=deeplink)
@@ -426,7 +466,7 @@ async def back_to_main(callback: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "referral_system")
 async def referral_system(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    async with aiosqlite.connect('bot_database.db') as db:
+    async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute('SELECT COUNT(*) FROM referrals WHERE referrer_id = ?', (user_id,))
         ref_count = (await cursor.fetchone())[0]
         cursor = await db.execute('SELECT COALESCE(SUM(amount), 0) FROM referral_earnings WHERE referrer_id = ?', (user_id,))
@@ -446,7 +486,7 @@ async def referral_system(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "profile")
 async def profile(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    async with aiosqlite.connect('bot_database.db') as db:
+    async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute('SELECT balance, vpn_active_until FROM users WHERE user_id = ?', (user_id,))
         user_data = await cursor.fetchone()
         balance = user_data[0] if user_data else 0
@@ -471,13 +511,15 @@ async def profile(callback: types.CallbackQuery):
 async def check_expired_subscriptions():
     while True:
         now = datetime.now(timezone.utc)
-        async with aiosqlite.connect("bot_database.db") as db:
+        async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("SELECT user_id, expires_at FROM subscriptions")
             rows = await cursor.fetchall()
             for user_id, expires_at in rows:
                 try:
                     if datetime.fromisoformat(expires_at) < now:
+                        # удаляем подписку и очищаем vpn_links
                         await db.execute("DELETE FROM subscriptions WHERE user_id = ?", (user_id,))
+                        await db.execute("DELETE FROM vpn_links WHERE user_id = ?", (user_id,))
                         await db.execute("UPDATE users SET vpn_active_until=NULL WHERE user_id=?", (user_id,))
                         await db.commit()
                         try:
