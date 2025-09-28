@@ -18,8 +18,7 @@ cat > $CONFIG_PATH <<EOF
         "clients": [
           {
             "id": "29e9cdce-dff1-49f4-b94b-b26fa32a9a6b",
-            "flow": "xtls-rprx-vision",
-            "encryption": "none"
+            "flow": "xtls-rprx-vision"
           }
         ],
         "decryption": "none"
