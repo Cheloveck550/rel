@@ -1,36 +1,33 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash
+set -e
 
-# === ПОДСТАВЛЕНЫ ТВОИ НОВЫЕ ДАННЫЕ ===
-UUID="10dad63d-53ac-4136-a725-e0b075164ed5"
-PRIV="SEqS8SST9599eUO0BqVQYjq-UE0sA9EV4oHhNQqsHs"
-PUB="wr6EkbDM_3SDXL_6Zh4MPH_aB3Gb1IBu2O5a2k12kM"   # это PublicKey (у тебя Xray печатает его с меткой Password)
-SID="ebc55ee42c0dea08"
+# === Константы ===
+UUID="10dad63d-53ac-4136-a725-eb0b75164ed5"
+PRIV="SEqS8SST99euUoBDqVYQYjq-UEoA9EV4oHhNQqsHs"
+PBK="wr6EkbDM_3SDXL_6zh4MPH_aB3Gb1tBU205a2k12kM"
+SID="ebc55ee42cdea080"
+DOMAIN="64.188.64.214"
 SNI="www.google.com"
-PORT=443
+XRAY_CONFIG="/usr/local/etc/xray/config.json"
 
-CFG="/usr/local/etc/xray/config.json"
-mkdir -p /usr/local/etc/xray /var/log/xray
+echo "→ Бэкапим $XRAY_CONFIG ..."
+cp $XRAY_CONFIG $XRAY_CONFIG.bak.$(date +%s) || true
 
-echo "→ Бэкапим $CFG ..."
-cp -a "$CFG" "$CFG.bak.$(date +%s)" 2>/dev/null || true
-
-cat >"$CFG" <<JSON
+# === Генерируем новый конфиг ===
+cat > $XRAY_CONFIG <<JSON
 {
-  "log": {
-    "loglevel": "warning",
-    "access": "/var/log/xray/access.log",
-    "error": "/var/log/xray/error.log"
-  },
   "inbounds": [
     {
-      "port": $PORT,
+      "port": 443,
       "protocol": "vless",
       "settings": {
         "clients": [
-          { "id": "$UUID", "flow": "xtls-rprx-vision" }
-        ],
-        "decryption": "none"
+          {
+            "id": "$UUID",
+            "flow": "xtls-rprx-vision",
+            "encryption": "none"
+          }
+        ]
       },
       "streamSettings": {
         "network": "tcp",
@@ -38,12 +35,12 @@ cat >"$CFG" <<JSON
         "realitySettings": {
           "show": false,
           "dest": "$SNI:443",
+          "xver": 0,
           "serverNames": ["$SNI"],
           "privateKey": "$PRIV",
           "shortIds": ["$SID"]
         }
-      },
-      "sniffing": { "enabled": true, "destOverride": ["http","tls"] }
+      }
     }
   ],
   "outbounds": [
@@ -54,27 +51,25 @@ cat >"$CFG" <<JSON
 JSON
 
 echo "→ Перезапускаем Xray ..."
-ufw allow 443/tcp >/dev/null 2>&1 || true
 systemctl restart xray
 
-sleep 1
+sleep 2
 echo "→ Проверяем порт 443:"
-ss -tlpn | grep ":443" || echo "⚠ Порт 443 не слушается"
+ss -tlnp | grep ":443" || echo "✖ Порт 443 не слушается"
 
 echo
 echo "== Готовые VLESS ссылки =="
-VLESS_FLOW="vless://$UUID@64.188.64.214:$PORT?type=tcp&security=reality&encryption=none&fp=chrome&sni=$SNI&pbk=$PUB&sid=$SID&flow=xtls-rprx-vision#Pro100VPN"
-VLESS_NOFLOW="vless://$UUID@64.188.64.214:$PORT?type=tcp&security=reality&encryption=none&fp=chrome&sni=$SNI&pbk=$PUB&sid=$SID#Pro100VPN"
-echo "с flow:     $VLESS_FLOW"
-echo "без flow:   $VLESS_NOFLOW"
+
+echo "с flow:"
+echo "vless://$UUID@$DOMAIN:443?type=tcp&security=reality&encryption=none&fp=chrome&sni=$SNI&pbk=$PBK&sid=$SID&flow=xtls-rprx-vision#Pro100VPN"
+echo
+echo "без flow:"
+echo "vless://$UUID@$DOMAIN:443?type=tcp&security=reality&encryption=none&fp=chrome&sni=$SNI&pbk=$PBK&sid=$SID#Pro100VPN"
 
 echo
-python3 - <<PY
-import urllib.parse, os
-v1=os.environ["VLESS_FLOW"]
-print("== Deep-link для HappVPN (вариант с flow) ==")
-print("happ://add/"+urllib.parse.quote(v1, safe=""))
-PY
+echo "== Deep-link для HappVPN (с flow) =="
+LINK="vless://$UUID@$DOMAIN:443?type=tcp&security=reality&encryption=none&fp=chrome&sni=$SNI&pbk=$PBK&sid=$SID&flow=xtls-rprx-vision#Pro100VPN"
+echo "happ://add/$(python3 -c "import urllib.parse; print(urllib.parse.quote('$LINK'))")"
 
 echo
-echo "Готово."
+echo "✔ Готово."
