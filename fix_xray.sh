@@ -2,98 +2,79 @@
 set -euo pipefail
 
 CONFIG="/usr/local/etc/xray/config.json"
+XRAY_BIN="${XRAY_BIN:-/usr/local/bin/xray}"
 
-need() {
-  command -v "$1" >/dev/null 2>&1 || {
-    apt-get update -y >/dev/null 2>&1 || true
-    apt-get install -y "$1"
-  }
-}
+need() { command -v "$1" >/dev/null 2>&1 || { echo "→ Устанавливаю $1 ..."; apt-get update -y && apt-get install -y "$1"; }; }
 
+# Требуются jq и wireguard-tools (wg)
 need jq
 need wireguard-tools
+need coreutils
 
-[[ -f "$CONFIG" ]] || { echo "✖ Не найден $CONFIG"; exit 1; }
-
-PK_RAW="$(jq -r '.inbounds[]|select(.protocol=="vless")|.streamSettings.realitySettings.privateKey' "$CONFIG")"
-SNI="$(jq -r '.inbounds[]|select(.protocol=="vless")|.streamSettings.realitySettings.serverNames[0] // .streamSettings.realitySettings.serverName' "$CONFIG")"
-SID="$(jq -r '.inbounds[]|select(.protocol=="vless")|.streamSettings.realitySettings.shortIds[0] // .streamSettings.realitySettings.shortId' "$CONFIG")"
-
-if [[ -z "$PK_RAW" || "$PK_RAW" == "null" ]]; then
-  echo "✖ В конфиге не найден realitySettings.privateKey"; exit 1;
-fi
-
-# ---- функция декодирования 32-байтового X25519 приватника из разных вариантов base64 ----
-decode_pk() {
-  local s="$1" out=""
-  # убираем пробелы/переводы строк
-  s="${s//$'\n'/}"; s="${s//$'\r'/}"
-
-  # функция добавления паддинга '=' до кратности 4
-  pad4() {
-    local n=$(( ${#1} % 4 ))
-    if   [[ $n -eq 2 ]]; then echo "${1}=="
-    elif [[ $n -eq 3 ]]; then echo "${1}="
-    elif [[ $n -eq 0 ]]; then echo "${1}"
-    else echo "${1}"; fi
-  }
-
-  # 1) пробуем base64url -> base64
-  if [[ "$s" =~ ^[A-Za-z0-9_-]+$ ]]; then
-    local b64="$(pad4 "$(echo -n "$s" | tr '_-' '/+')")"
-    if out="$(echo -n "$b64" | base64 -d 2>/dev/null)"; then
-      printf '%s' "$out"; return 0
-    fi
-  fi
-
-  # 2) пробуем обычный base64 (без паддинга)
-  if [[ "$s" =~ ^[A-Za-z0-9+/=]+$ ]]; then
-    local b64="$(pad4 "$s")"
-    if out="$(echo -n "$b64" | base64 -d 2>/dev/null)"; then
-      printf '%s' "$out"; return 0
-    fi
-  fi
-
-  # 3) как крайний случай — попробовать декод с игнором мусора
-  if out="$(echo -n "$s" | base64 -d --ignore-garbage 2>/dev/null)"; then
-    printf '%s' "$out"; return 0
-  fi
-
-  return 1
-}
-
-BIN_PK="$(decode_pk "$PK_RAW" || true)"
-LEN="${#BIN_PK}"
-
-if [[ -z "$BIN_PK" || "$LEN" -ne 32 ]]; then
-  echo "✖ Не удалось корректно декодировать privateKey."
-  echo "  Длина после попытки декода: $LEN (ожидалось 32 байта)."
-  echo "  Исходная строка (обрезано): ${PK_RAW:0:8}…${PK_RAW: -8}"
+# 1) Читаем privateKey Reality из конфигурации
+if [[ ! -f "$CONFIG" ]]; then
+  echo "✖ Не найден $CONFIG"
   exit 1
 fi
 
-# считаем публичный ключ и кодируем его в base64url без '='
-PBK="$(printf '%s' "$BIN_PK" | wg pubkey | tr -d '\n' \
-      | base64 -d 2>/dev/null || printf '%s' "$BIN_PK" >/dev/null)"
+PRIV=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.privateKey // empty' "$CONFIG")
 
-# wg pubkey выводит публичный ключ в обычном base64.
-PBK_URL="$(printf '%s' "$BIN_PK" | wg pubkey \
-  | tr -d '\n' \
-  | base64 -d 2>/dev/null \
-  | base64 2>/dev/null | tr '/+' '_-' | tr -d '=' 2>/dev/null || true)"
-
-# Если предыдущая строка пустая (редко, но бывает из-за различий base64), используем стандартный путь:
-if [[ -z "$PBK_URL" ]]; then
-  PBK_URL="$(printf '%s' "$BIN_PK" | wg pubkey \
-    | tr '/+' '_-' | tr -d '=')"
+if [[ -z "$PRIV" || "$PRIV" == "null" ]]; then
+  echo "✖ В $CONFIG не найден Reality privateKey"
+  exit 1
 fi
 
-mask_pk="${PK_RAW:0:6}…${PK_RAW: -6}"
-echo "✅ Конфиг: $CONFIG"
-echo "• serverName (SNI):  ${SNI:-<не задан>}"
-echo "• shortId (SID):     ${SID:-<не задан>}"
-echo "• privateKey:        $mask_pk"
-echo "• PublicKey (pbk):   $PBK_URL"
+echo "✓ Нашёл privateKey в конфиге:"
+echo "  $PRIV"
+echo
 
-# Тихий вывод для скриптов
-[[ "${1:-}" == "--raw" ]] && echo -n "$PBK_URL"
+# Функция: URL-safe base64 → обычный base64 с паддингом
+to_std_b64() {
+  local s="${1//-/+}"
+  s="${s//_//}"
+  local m=$(( ${#s} % 4 ))
+  if (( m == 2 )); then s="${s}=="
+  elif (( m == 3 )); then s="${s}="
+  elif (( m == 1 )); then s="${s}==="  # на всякий случай
+  fi
+  printf '%s' "$s"
+}
+
+# Функция: обычный base64 → URL-safe без '='
+to_url_b64() {
+  printf '%s' "$1" | tr '+/' '-_' | tr -d '='
+}
+
+PBK=""
+
+# 2) Попытка №1 — через xray x25519 -i (если поддерживается в твоей сборке)
+if [[ -x "$XRAY_BIN" ]]; then
+  OUT="$("$XRAY_BIN" x25519 -i "$PRIV" 2>/dev/null || true)"
+  CANDIDATE="$(printf '%s\n' "$OUT" | awk '/PublicKey/ {print $2}' | head -n1)"
+  if [[ -n "$CANDIDATE" ]]; then
+    PBK="$CANDIDATE"
+  fi
+fi
+
+# 3) Попытка №2 — через wg pubkey (надёжно)
+if [[ -z "$PBK" ]]; then
+  STD="$(to_std_b64 "$PRIV")" || true
+  if ! BYTES=$(printf '%s' "$STD" | base64 -d 2>/dev/null); then
+    echo "✖ Не удалось декодировать privateKey (base64). Проверь ключ."
+    exit 1
+  fi
+  # wg pubkey ожидает сырой 32-байтовый приватник на stdin и возвращает base64 (обычный)
+  WG_PUB=$(printf '%s' "$BYTES" | wg pubkey 2>/dev/null || true)
+  if [[ -z "$WG_PUB" ]]; then
+    echo "✖ wg pubkey вернул пусто. Ключ некорректный?"
+    exit 1
+  fi
+  PBK="$(to_url_b64 "$WG_PUB")"
+fi
+
+echo "=============================="
+echo "PUBLIC KEY (pbk) для Reality:"
+echo "$PBK"
+echo "=============================="
+echo
+echo "Подставляй этот pbk в клиентскую vless-ссылку как pbk=${PBK}"
