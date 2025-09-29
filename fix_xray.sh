@@ -1,29 +1,19 @@
-cat >/root/rel/rebuild_reality.sh <<'SH'
-#!/usr/bin/env bash
+bash -c '
 set -euo pipefail
-
-# === Параметры сервера ===
-IP="64.188.64.214"                   # твой внешний IP
-SNI="${SNI_OVERRIDE:-www.cloudflare.com}"   # можно сменить на www.google.com позже
+IP="64.188.64.214"
+SNI="${SNI_OVERRIDE:-www.google.com}"   # можно поменять на www.cloudflare.com, www.apple.com и т.д.
 NAME="Pro100VPN"
 
-# === Проверка зависимостей ===
-command -v jq >/dev/null || { echo "Установи jq: apt update && apt install -y jq"; exit 1; }
-[ -x /usr/local/bin/xray ] || { echo "Не найден /usr/local/bin/xray"; exit 1; }
+command -v jq >/dev/null 2>&1 || { apt update -y && apt install -y jq; }
 
-# === Генерация UUID/shortId/ключей x25519 ===
+[ -x /usr/local/bin/xray ] || { echo "Не найден /usr/local/bin/xray (проверь установку Xray)"; exit 1; }
+
 UUID="$(cat /proc/sys/kernel/random/uuid)"
-SID="$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"   # 16 hex
-read PRIV PUB < <(/usr/local/bin/xray x25519 | awk '/Private/{p=$2}/Public/{print p,$2}')
+SID="$(head -c 8 /dev/urandom | od -An -tx1 | tr -d " \n")"
+read PRIV PUB < <(/usr/local/bin/xray x25519 | awk "/Private/{p=\$2}/Public/{print p,\$2}")
 
-echo "== Новые параметры =="
-echo "UUID    : $UUID"
-echo "SNI     : $SNI"
-echo "shortId : $SID"
-echo "Private : $PRIV"
-echo "Public  : $PUB"
+echo "== Новые параметры =="; echo "UUID: $UUID"; echo "SNI: $SNI"; echo "shortId: $SID"; echo "PublicKey: $PUB"
 
-# === Бэкап и запись конфига Xray (VLESS+Reality inbound на 443, Vision-flow) ===
 CFG="/usr/local/etc/xray/config.json"
 mkdir -p /usr/local/etc/xray /var/log/xray
 cp -a "$CFG" "$CFG.bak.$(date +%s)" 2>/dev/null || true
@@ -41,10 +31,7 @@ cat >"$CFG" <<JSON
       "protocol": "vless",
       "settings": {
         "clients": [
-          {
-            "id": "$UUID",
-            "flow": "xtls-rprx-vision"
-          }
+          { "id": "$UUID", "flow": "xtls-rprx-vision" }
         ],
         "decryption": "none"
       },
@@ -59,10 +46,7 @@ cat >"$CFG" <<JSON
           "shortIds": ["$SID"]
         }
       },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["http","tls"]
-      }
+      "sniffing": { "enabled": true, "destOverride": ["http","tls"] }
     }
   ],
   "outbounds": [
@@ -72,39 +56,31 @@ cat >"$CFG" <<JSON
 }
 JSON
 
-# === Фаервол (на всякий случай) ===
 ufw allow 443/tcp >/dev/null 2>&1 || true
-
-# === Перезапуск Xray и проверка ===
 systemctl restart xray
 sleep 1
-systemctl --no-pager --full status xray.service || true
-ss -tlpn | grep ':443' || { echo "Порт 443 не слушается!"; exit 1; }
 
-# === Формирование ссылок ===
+echo
+echo "== Состояние Xray =="
+systemctl --no-pager --full status xray.service | sed -n "1,25p" || true
+echo
+echo "== Порт 443 =="
+ss -tlpn | grep ":443" || echo "⚠ Порт 443 не слушается"
+
 VLESS_FLOW="vless://$UUID@$IP:443?type=tcp&security=reality&encryption=none&fp=randomized&sni=$SNI&pbk=$PUB&sid=$SID&flow=xtls-rprx-vision#$NAME"
 VLESS_NOFLOW="vless://$UUID@$IP:443?type=tcp&security=reality&encryption=none&fp=randomized&sni=$SNI&pbk=$PUB&sid=$SID#$NAME"
 
-# deep-link для HappVPN: кодируем vless-ссылку с flow
-ENCODED="$(python3 - <<PY
-import urllib.parse,sys
-s = "$VLESS_FLOW"
-print("happ://add/" + urllib.parse.quote(s, safe=""))
+python3 - <<PY
+import urllib.parse
+v1 = """$VLESS_FLOW"""
+v2 = """$VLESS_NOFLOW"""
+print("\\n=== ССЫЛКИ ДЛЯ КЛИЕНТА ===")
+print("с flow (Vision):\\n"+v1+"\\n")
+print("без flow:\\n"+v2+"\\n")
+print("=== Deep-link для HappVPN (вариант с flow) ===")
+print("happ://add/"+urllib.parse.quote(v1, safe=""))
 PY
-)"
 
 echo
-echo "=== ССЫЛКИ ДЛЯ КЛИЕНТА ==="
-echo "с flow (Vision):"
-echo "$VLESS_FLOW"
-echo
-echo "без flow:"
-echo "$VLESS_NOFLOW"
-echo
-echo "=== Deep-link для HappVPN (вариант с flow) ==="
-echo "$ENCODED"
-echo
 echo "Готово."
-SH
-chmod +x /root/rel/rebuild_reality.sh
-sudo /root/rel/rebuild_reality.sh
+'
