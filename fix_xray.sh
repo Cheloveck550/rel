@@ -1,27 +1,66 @@
-#!/bin/bash
-CONFIG="/usr/local/etc/xray/config.json"
-SERVER_PY="/root/rel/server.py"
+#!/usr/bin/env bash
+set -euo pipefail
 
-echo "🔧 Проверяем конфиг Xray..."
+CFG_DIR="/usr/local/etc/xray"
+CFG="$CFG_DIR/config.json"
 
-# Чистим лишний параметр encryption
-sed -i '/"encryption":/d' $CONFIG
+UUID="29e9cdce-dff1-49f4-b94b-b26fa32a9a6b"
+PRIV="-N0J53N3H9YhAJsha7SPjhG4culuTm3BABpE5CcdJWs"
+SHORTID="ba4211bb433df45d"
+SNI="google.com"             # важный фикс: без www
+DEST="google.com:443"
 
-# Проверка и исправление порта
-jq '.inbounds[0].port' $CONFIG | grep -q 443
-if [ $? -ne 0 ]; then
-  echo "⚠️ Порт не 443 — исправляем"
-  tmp=$(mktemp)
-  jq '.inbounds[0].port = 443' $CONFIG > "$tmp" && mv "$tmp" $CONFIG
-fi
+echo "==> Готовлю каталог $CFG_DIR и права…"
+sudo mkdir -p "$CFG_DIR"
+sudo chown root:root "$CFG_DIR"
+sudo chmod 755 "$CFG_DIR"
 
-# Проверяем синтаксис JSON
-jq . $CONFIG >/dev/null
-if [ $? -ne 0 ]; then
-  echo "❌ Ошибка в JSON. Проверь config.json"
-  exit 1
-fi
+echo "==> Пишу новый Reality-конфиг в $CFG…"
+sudo tee "$CFG" >/dev/null <<EOF
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    {
+      "port": 443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          { "id": "$UUID", "flow": "xtls-rprx-vision" }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "$DEST",
+          "serverNames": ["$SNI"],
+          "privateKey": "$PRIV",
+          "shortIds": ["$SHORTID"]
+        },
+        "tcpSettings": { "header": { "type": "none" } }
+      },
+      "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
+    }
+  ],
+  "outbounds": [ { "protocol": "freedom" }, { "protocol": "blackhole" } ]
+}
+EOF
 
-echo "✅ Конфиг исправлен и проверен"
-systemctl restart xray
-systemctl status xray --no-pager -l | head -n 20
+echo "==> Выставляю права на файл…"
+sudo chown root:root "$CFG"
+sudo chmod 644 "$CFG"
+
+echo "==> Проверяю JSON…"
+jq empty "$CFG" >/dev/null
+
+echo "==> Перезапускаю Xray…"
+sudo systemctl restart xray
+sleep 1
+sudo systemctl status xray --no-pager -l | head -n 20
+
+echo "==> Проверяю, слушает ли порт 443…"
+ss -tlnp | grep ':443' || (echo '⚠️  443 не слушается' && exit 1)
+
+echo "✅ Готово."
