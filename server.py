@@ -9,14 +9,17 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 
 app = FastAPI()
 
-# ===== настройки путей =====
+# ===== пути/файлы =====
 DB_FILE = "bot_database.db"
 XRAY_CONFIG = Path("/usr/local/etc/xray/config.json")
 
-# Если вдруг derivation publicKey не сработает, подставим вручную:
-PUBLIC_KEY_OVERRIDE: Optional[str] = None
-# Пример (ваш реальный pbk):
-# PUBLIC_KEY_OVERRIDE = "m7n-24tMvfTdp2-2sr-vAaM3t9NzGDpTNrva6xM6-ls"
+# ===== сетевые параметры =====
+DOMAIN_OR_IP = "64.188.64.214"   # ХОСТ в vless:// — твой сервер! (не sni)
+# если позже перейдёшь на домен — подставь его сюда
+
+# ===== override public key (pbk) =====
+# У тебя derive не сработал — включаем ручной pbk:
+PUBLIC_KEY_OVERRIDE: Optional[str] = "m7n-24tMvfTdp2-2sr-vAaM3t9NzGDpTNrva6xM6-ls"
 
 # ===== утилиты =====
 def db_has_token(token: str) -> bool:
@@ -31,7 +34,6 @@ def db_has_token(token: str) -> bool:
 def read_vless_from_config() -> Tuple[str, int, str, str, str]:
     """
     Возвращает (uuid, port, sni, short_id, private_key) из Xray config.json.
-    Поддерживает и множественное/единственное написание полей.
     """
     if not XRAY_CONFIG.exists():
         raise RuntimeError(f"Xray config not found: {XRAY_CONFIG}")
@@ -40,11 +42,7 @@ def read_vless_from_config() -> Tuple[str, int, str, str, str]:
 
     # ищем inbound VLESS
     inbounds = data.get("inbounds") or []
-    vless_in = None
-    for ib in inbounds:
-        if ib.get("protocol") == "vless":
-            vless_in = ib
-            break
+    vless_in = next((ib for ib in inbounds if ib.get("protocol") == "vless"), None)
     if not vless_in:
         raise RuntimeError("No VLESS inbound found in Xray config")
 
@@ -61,20 +59,16 @@ def read_vless_from_config() -> Tuple[str, int, str, str, str]:
 
     stream = vless_in.get("streamSettings") or {}
     reality = stream.get("realitySettings") or {}
-    # sni (server name) может храниться в serverNames/0 или serverName
+
+    # SNI
     server_names = reality.get("serverNames") or []
     sni = server_names[0] if server_names else reality.get("serverName")
-
     if not sni:
         raise RuntimeError("serverName/serverNames missing in realitySettings")
 
-    # shortId/shortIds
+    # shortId
     short_ids = reality.get("shortIds")
-    short_id = None
-    if isinstance(short_ids, list) and short_ids:
-        short_id = short_ids[0]
-    if not short_id:
-        short_id = reality.get("shortId")
+    short_id = (short_ids[0] if isinstance(short_ids, list) and short_ids else reality.get("shortId"))
     if not short_id:
         raise RuntimeError("shortId/shortIds missing in realitySettings")
 
@@ -99,7 +93,6 @@ def derive_public_key(private_key: str) -> Optional[str]:
         )
         for line in out.splitlines():
             if "PublicKey" in line:
-                # формат: PublicKey: <pbk>
                 return line.split(":", 1)[1].strip()
     except Exception:
         pass
@@ -107,7 +100,7 @@ def derive_public_key(private_key: str) -> Optional[str]:
 
 def make_vless_link(
     uuid: str,
-    host_or_ip: str,
+    host: str,
     port: int,
     sni: str,
     pbk: str,
@@ -116,8 +109,11 @@ def make_vless_link(
     fp: str = "chrome",
     tag: str = "Pro100VPN",
 ) -> str:
+    """
+    Формирует vless:// ссылку. Хост = твой сервер; SNI = реальный домен назначения.
+    """
     base = (
-        f"vless://{uuid}@{host_or_ip}:{port}"
+        f"vless://{uuid}@{host}:{port}"
         f"?type=tcp&security=reality&fp={fp}"
         f"&sni={sni}&pbk={pbk}&sid={short_id}"
     )
@@ -129,8 +125,7 @@ def make_vless_link(
 @app.get("/subs/{token}", response_class=HTMLResponse)
 async def subs_page(token: str):
     """
-    HTML-страница с двумя кнопками: с flow и без flow.
-    Все параметры читаются из реального /usr/local/etc/xray/config.json.
+    HTML с двумя кнопками: с flow и без flow. HappVPN открывает deeplink.
     """
     if not db_has_token(token):
         raise HTTPException(status_code=404, detail="Подписка не найдена")
@@ -140,62 +135,64 @@ async def subs_page(token: str):
         pbk = derive_public_key(private_key)
         if not pbk:
             raise RuntimeError("Не удалось получить publicKey (pbk). "
-                               "Задайте PUBLIC_KEY_OVERRIDE в server.py")
+                               "Проверь PUBLIC_KEY_OVERRIDE в server.py")
 
-        # используем тот же адрес, что у клиента: внешний IP/домен
-        host_or_ip = sni  # часто используют тот же домен; если нужен IP — поменяйте ниже
-        # Если хотите принудительно IP сервера:
-        # host_or_ip = "64.188.64.214"
+        # Хост ДОЛЖЕН быть адресом твоего сервера:
+        host = DOMAIN_OR_IP
 
-        vless_flow = make_vless_link(uuid, host_or_ip, port, sni, pbk, short_id, use_flow=True)
-        vless_noflow = make_vless_link(uuid, host_or_ip, port, sni, pbk, short_id, use_flow=False)
+        # deeplink открывает URL, а URL отдаёт plain-text vless://
+        sub_url_flow   = f"http://{DOMAIN_OR_IP}/sub/{token}?noflow=0"
+        sub_url_noflow = f"http://{DOMAIN_OR_IP}/sub/{token}?noflow=1"
+
+        html = f"""
+        <html>
+          <head><title>Подписка Pro100VPN</title></head>
+          <body style="font-family:Arial; text-align:center; margin-top:48px;">
+            <h2>Подписка Pro100VPN</h2>
+            <p>Выберите способ добавления в HappVPN:</p>
+            <div style="margin:10px;">
+                <a href="happ://add/{sub_url_flow}">
+                    <button style="padding:10px 18px;">Добавить (с flow)</button>
+                </a>
+            </div>
+            <div style="margin:10px;">
+                <a href="happ://add/{sub_url_noflow}">
+                    <button style="padding:10px 18px;">Добавить (без flow)</button>
+                </a>
+            </div>
+            <p style="color:#777;max-width:680px;margin:24px auto 0;">
+              Если кнопки не срабатывают — скопируйте ссылку вручную и откройте в HappVPN:
+              <br><code>happ://add/{sub_url_flow}</code><br>
+              <code>happ://add/{sub_url_noflow}</code>
+            </p>
+          </body>
+        </html>
+        """
+        return HTMLResponse(html)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"config read/derive error: {e}")
 
-    html = f"""
-    <html>
-      <head><title>Подписка Pro100VPN</title></head>
-      <body style="font-family:Arial; text-align:center; margin-top:48px;">
-        <h2>Подписка Pro100VPN</h2>
-        <p>Выберите способ добавления в HappVPN:</p>
-        <div style="margin:10px;">
-            <a href="happ://add/{vless_flow}">
-                <button style="padding:10px 18px;">Добавить (с flow)</button>
-            </a>
-        </div>
-        <div style="margin:10px;">
-            <a href="happ://add/{vless_noflow}">
-                <button style="padding:10px 18px;">Добавить (без flow)</button>
-            </a>
-        </div>
-        <p style="color:#777;max-width:680px;margin:24px auto 0;">
-          Если кнопки не срабатывают — скопируйте ссылку вручную и откройте в HappVPN:
-          <br><code>{vless_flow}</code><br>
-          <code>{vless_noflow}</code>
-        </p>
-      </body>
-    </html>
-    """
-    return HTMLResponse(html)
-
 @app.get("/sub/{token}", response_class=PlainTextResponse)
 async def subscription_plain(token: str, noflow: int = Query(0, description="1 — вернуть ссылку без flow")):
     """
-    Отдаёт САМУ vless:// ссылку (plain text).
-    ?noflow=1 — без flow; по умолчанию — с flow.
+    Возвращает САМУ vless:// ссылку (plain text), чтобы HappVPN импортировал как подписку.
+    ?noflow=1 — без flow; ?noflow=0 — с flow.
     """
     if not db_has_token(token):
         raise HTTPException(status_code=404, detail="Подписка не найдена")
+
     try:
         uuid, port, sni, short_id, private_key = read_vless_from_config()
         pbk = derive_public_key(private_key)
         if not pbk:
             raise RuntimeError("Не удалось получить publicKey (pbk). "
-                               "Задайте PUBLIC_KEY_OVERRIDE в server.py")
-        host_or_ip = sni  # или "64.188.64.214"
-        link = make_vless_link(uuid, host_or_ip, port, sni, pbk, short_id, use_flow=(noflow != 1))
+                               "Проверь PUBLIC_KEY_OVERRIDE в server.py")
+
+        host = DOMAIN_OR_IP
+        link = make_vless_link(uuid, host, port, sni, pbk, short_id, use_flow=(noflow != 1))
         return PlainTextResponse(link + "\n")
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"config read/derive error: {e}")
 
