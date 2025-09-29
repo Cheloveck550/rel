@@ -2,38 +2,39 @@
 set -euo pipefail
 
 CFG="/usr/local/etc/xray/config.json"
-HOST="64.188.64.214"           # host в ссылке = адрес твоего сервера
-FP="chrome"                    # можно поменять на randomized
+HOST="64.188.64.214"   # host в ссылке = адрес твоего сервера
+FP="chrome"
 
-if ! command -v jq >/dev/null 2>&1; then
-  apt-get update && apt-get install -y jq
+# Где xray
+XRAY="/usr/local/bin/xray"
+if ! [ -x "$XRAY" ]; then XRAY="$(command -v xray || true)"; fi
+if ! [ -x "${XRAY:-/nonexistent}" ]; then
+  echo "❌ Не найден xray (ожидался /usr/local/bin/xray)"; exit 1
 fi
 
-uuid=$(jq -r '.inbounds[] | select(.protocol=="vless") | .settings.clients[0].id' "$CFG")
-port=$(jq -r '.inbounds[] | select(.protocol=="vless") | .port' "$CFG")
-sni=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.serverNames[0] // .inbounds[]?.streamSettings?.realitySettings?.serverName' "$CFG")
-sid=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.shortIds[0] // .inbounds[]?.streamSettings?.realitySettings?.shortId' "$CFG")
-priv=$(jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.privateKey' "$CFG")
+uuid=$(jq -r '.inbounds[]|select(.protocol=="vless")|.settings.clients[0].id' "$CFG")
+port=$(jq -r '.inbounds[]|select(.protocol=="vless")|.port' "$CFG")
+sni=$(jq -r '.inbounds[]|select(.protocol=="vless")|.streamSettings.realitySettings.serverNames[0] // .inbounds[]|select(.protocol=="vless")|.streamSettings.realitySettings.serverName' "$CFG")
+sid=$(jq -r '.inbounds[]|select(.protocol=="vless")|.streamSettings.realitySettings.shortIds[0] // .inbounds[]|select(.protocol=="vless")|.streamSettings.realitySettings.shortId' "$CFG")
+priv=$(jq -r '.inbounds[]|select(.protocol=="vless")|.streamSettings.realitySettings.privateKey' "$CFG")
 
 if [[ -z "$uuid" || -z "$port" || -z "$sni" || -z "$sid" || -z "$priv" ]]; then
-  echo "❌ Не удалось извлечь один из параметров (uuid/port/sni/sid/privateKey)."
-  exit 1
+  echo "❌ Не удалось извлечь uuid/port/sni/sid/privateKey"; exit 1
 fi
 
-pbk=$(xray x25519 -i "$priv" | sed -n 's/^PublicKey: //p')
+out="$("$XRAY" x25519 -i "$priv" 2>&1 || true)"
+pbk="$(printf '%s\n' "$out" | sed -n 's/.*PublicKey[: ]\s*//p; s/.*Password[: ]\s*//p' | head -n1)"
 if [[ -z "$pbk" ]]; then
-  echo "❌ Не удалось получить PublicKey через xray x25519 -i"
-  exit 2
+  echo "⚠️ Вывод xray:\n$out"
+  echo "❌ Не удалось извлечь PublicKey/Password"; exit 2
 fi
 
-echo "UUID:   $uuid"
-echo "PORT:   $port"
-echo "SNI:    $sni"
-echo "SID:    $sid"
-echo "PBK:    $pbk"
-
+echo "UUID: $uuid"
+echo "PORT: $port"
+echo "SNI : $sni"
+echo "SID : $sid"
+echo "PBK : $pbk"
 echo
-echo "=== VLESS ссылки, которые ДОЛЖЕН принимать сервер ==="
-link_base="vless://$uuid@$HOST:$port?type=tcp&security=reality&encryption=none&fp=$FP&sni=$sni&pbk=$pbk&sid=$sid"
-echo "с flow:    ${link_base}&flow=xtls-rprx-vision#Pro100VPN"
-echo "без flow:  ${link_base}#Pro100VPN"
+base="vless://$uuid@$HOST:$port?type=tcp&security=reality&encryption=none&fp=$FP&sni=$sni&pbk=$pbk&sid=$sid"
+echo "с flow   : ${base}&flow=xtls-rprx-vision#Pro100VPN"
+echo "без flow : ${base}#Pro100VPN"
