@@ -4,20 +4,28 @@ set -euo pipefail
 CFG_DIR="/usr/local/etc/xray"
 CFG="$CFG_DIR/config.json"
 
-# === ВАШИ ДАННЫЕ ===
+# === ТВОИ ДАННЫЕ ===
 UUID="29e9cdce-dff1-49f4-b94b-b26fa32a9a6b"
-PRIV="-N0J53N3H9YhAJsha7SPjhG4culuTm3BABpE5CcdJWs"
-SHORTID="ba4211bb433df45d"
-SNI="google.com"           # важно: без www (как в рабочем клиентском примере)
-DEST="google.com:443"
+PRIVATE_KEY="-N0J53N3H9YhAJsha7SPjhG4culuTm3BABpE5CcdJWs"
+SHORT_ID="ba4211bb"                 # 8 символов — совместимый вариант
+SNI="www.google.com"                # самый совместимый вариант
+DEST="www.google.com:443"
+LOG_DIR="/var/log/xray"
 
-echo "==> Готовлю каталог и права…"
-mkdir -p "$CFG_DIR"
+echo "==> Готовлю директории и права…"
+mkdir -p "$CFG_DIR" "$LOG_DIR"
 chown root:root "$CFG_DIR"
 chmod 755 "$CFG_DIR"
+chown nobody:nogroup "$LOG_DIR" || true
+chmod 755 "$LOG_DIR"
 
-echo "==> Пишу Reality-конфиг в $CFG…"
-tee "$CFG" >/dev/null <<EOF
+echo "==> Бэкап старого конфига (если был)…"
+if [ -f "$CFG" ]; then
+  cp -a "$CFG" "$CFG.bak.$(date +%s)"
+fi
+
+echo "==> Пишу НОВЫЙ Reality-конфиг…"
+cat >"$CFG" <<'EOF'
 {
   "log": {
     "loglevel": "debug",
@@ -30,7 +38,7 @@ tee "$CFG" >/dev/null <<EOF
       "protocol": "vless",
       "settings": {
         "clients": [
-          { "id": "$UUID", "flow": "xtls-rprx-vision" }
+          { "id": "REPL_UUID", "flow": "xtls-rprx-vision" }
         ],
         "decryption": "none"
       },
@@ -39,10 +47,10 @@ tee "$CFG" >/dev/null <<EOF
         "security": "reality",
         "realitySettings": {
           "show": false,
-          "dest": "$DEST",
-          "serverNames": ["$SNI"],
-          "privateKey": "$PRIV",
-          "shortIds": ["$SHORTID"]
+          "dest": "REPL_DEST",
+          "serverNames": ["REPL_SNI"],
+          "privateKey": "REPL_PRIV",
+          "shortIds": ["REPL_SID"]
         },
         "tcpSettings": { "header": { "type": "none" } }
       },
@@ -56,25 +64,28 @@ tee "$CFG" >/dev/null <<EOF
 }
 EOF
 
+# подставляем твои значения
+sed -i \
+  -e "s/REPL_UUID/$UUID/" \
+  -e "s#REPL_PRIV#$PRIVATE_KEY#" \
+  -e "s/REPL_SID/$SHORT_ID/" \
+  -e "s/REPL_SNI/$SNI/" \
+  -e "s/REPL_DEST/$DEST/" \
+  "$CFG"
+
+echo "==> Проверяю синтаксис JSON…"
+jq empty "$CFG"
+
 echo "==> Права на файл…"
 chown root:root "$CFG"
 chmod 644 "$CFG"
-
-echo "==> Логи для Xray…"
-mkdir -p /var/log/xray
-chown nobody:nogroup /var/log/xray || true
-chmod 755 /var/log/xray
-
-echo "==> Проверка JSON…"
-jq empty "$CFG" >/dev/null
 
 echo "==> Перезапуск Xray…"
 systemctl restart xray
 sleep 1
 systemctl status xray --no-pager -l | head -n 20
 
-echo "==> Проверка, слушает ли 443…"
-ss -tlnp | grep ':443' || (echo '⚠️  Порт 443 не слушается Xray' && exit 1)
+echo "==> Проверка порта 443…"
+ss -tlnp | grep ':443' || (echo '⚠️ Xray не слушает 443' && exit 1)
 
-echo "==> Последние строки логов Xray:"
-tail -n 50 /var/log/xray/error.log || true
+echo "==> Готово."
