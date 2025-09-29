@@ -11,10 +11,10 @@ app = FastAPI()
 DB_FILE = "bot_database.db"
 XRAY_CONFIG = Path("/usr/local/etc/xray/config.json")
 
-# ХОСТ в vless:// — адрес твоего сервера (а не SNI)
+# Host в vless:// — адрес твоего сервера, а не SNI
 DOMAIN_OR_IP = "64.188.64.214"
 
-# Публичный ключ от вашего privateKey (override — у тебя derive не работал)
+# У тебя derive не сработал — используем override
 PUBLIC_KEY_OVERRIDE: Optional[str] = "m7n-24tMvfTdp2-2sr-vAaM3t9NzGDpTNrva6xM6-ls"
 
 def db_has_token(token: str) -> bool:
@@ -52,9 +52,10 @@ def read_vless_from_config() -> Tuple[str, int, str, str]:
     return uuid, port, sni, short_id
 
 def make_vless(uuid: str, host: str, port: int, sni: str, pbk: str, short_id: str, use_flow: bool) -> str:
+    # ОБЯЗАТЕЛЬНО: encryption=none для Vision
     base = (
         f"vless://{uuid}@{host}:{port}"
-        f"?type=tcp&security=reality&fp=chrome"
+        f"?type=tcp&security=reality&encryption=none&fp=chrome"
         f"&sni={sni}&pbk={pbk}&sid={short_id}"
     )
     if use_flow:
@@ -66,7 +67,6 @@ async def subs_page(token: str):
     if not db_has_token(token):
         raise HTTPException(status_code=404, detail="Подписка не найдена")
 
-    # просто линк на /sub/.. — HappVPN сам скачает и импортирует
     url_flow   = f"http://{DOMAIN_OR_IP}/sub/{token}?noflow=0"
     url_noflow = f"http://{DOMAIN_OR_IP}/sub/{token}?noflow=1"
 
