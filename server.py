@@ -14,7 +14,7 @@ XRAY_CONFIG = Path("/usr/local/etc/xray/config.json")
 # ХОСТ в vless:// — адрес твоего сервера (а не SNI)
 DOMAIN_OR_IP = "64.188.64.214"
 
-# Публичный ключ от твоего privateKey (override, т.к. derive не работал)
+# Публичный ключ от вашего privateKey (override — у тебя derive не работал)
 PUBLIC_KEY_OVERRIDE: Optional[str] = "m7n-24tMvfTdp2-2sr-vAaM3t9NzGDpTNrva6xM6-ls"
 
 def db_has_token(token: str) -> bool:
@@ -54,7 +54,7 @@ def read_vless_from_config() -> Tuple[str, int, str, str]:
 def make_vless(uuid: str, host: str, port: int, sni: str, pbk: str, short_id: str, use_flow: bool) -> str:
     base = (
         f"vless://{uuid}@{host}:{port}"
-        f"?type=tcp&security=reality&fp=random"
+        f"?type=tcp&security=reality&fp=chrome"
         f"&sni={sni}&pbk={pbk}&sid={short_id}"
     )
     if use_flow:
@@ -66,12 +66,7 @@ async def subs_page(token: str):
     if not db_has_token(token):
         raise HTTPException(status_code=404, detail="Подписка не найдена")
 
-    uuid, port, sni, short_id = read_vless_from_config()
-    pbk = PUBLIC_KEY_OVERRIDE
-    if not pbk:
-        raise HTTPException(status_code=500, detail="PUBLIC_KEY_OVERRIDE пуст")
-
-    # deeplink на подпись: HappVPN сходит на /sub/{token} и заберёт plain-text ссылку
+    # просто линк на /sub/.. — HappVPN сам скачает и импортирует
     url_flow   = f"http://{DOMAIN_OR_IP}/sub/{token}?noflow=0"
     url_noflow = f"http://{DOMAIN_OR_IP}/sub/{token}?noflow=1"
 
@@ -106,7 +101,7 @@ async def sub_plain(token: str, noflow: int = Query(0, description="1 — без
     if not pbk:
         raise HTTPException(status_code=500, detail="PUBLIC_KEY_OVERRIDE пуст")
 
-    host = DOMAIN_OR_IP                    # хост = IP сервера
+    host = DOMAIN_OR_IP
     link = make_vless(uuid, host, port, sni, pbk, short_id, use_flow=(noflow != 1))
     return PlainTextResponse(link + "\n")
 
