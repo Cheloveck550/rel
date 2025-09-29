@@ -118,3 +118,4 @@ async def subscription_plain(token: str, noflow: int = Query(0, description="1 â
 @app.get("/", response_class=PlainTextResponse)
 async def root():
     return PlainTextResponse("OK")
+  
