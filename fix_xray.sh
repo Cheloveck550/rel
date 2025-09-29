@@ -4,21 +4,26 @@ set -euo pipefail
 CFG_DIR="/usr/local/etc/xray"
 CFG="$CFG_DIR/config.json"
 
+# === ВАШИ ДАННЫЕ ===
 UUID="29e9cdce-dff1-49f4-b94b-b26fa32a9a6b"
 PRIV="-N0J53N3H9YhAJsha7SPjhG4culuTm3BABpE5CcdJWs"
 SHORTID="ba4211bb433df45d"
-SNI="google.com"             # важный фикс: без www
+SNI="google.com"           # важно: без www (как в рабочем клиентском примере)
 DEST="google.com:443"
 
-echo "==> Готовлю каталог $CFG_DIR и права…"
-sudo mkdir -p "$CFG_DIR"
-sudo chown root:root "$CFG_DIR"
-sudo chmod 755 "$CFG_DIR"
+echo "==> Готовлю каталог и права…"
+mkdir -p "$CFG_DIR"
+chown root:root "$CFG_DIR"
+chmod 755 "$CFG_DIR"
 
-echo "==> Пишу новый Reality-конфиг в $CFG…"
-sudo tee "$CFG" >/dev/null <<EOF
+echo "==> Пишу Reality-конфиг в $CFG…"
+tee "$CFG" >/dev/null <<EOF
 {
-  "log": { "loglevel": "warning" },
+  "log": {
+    "loglevel": "debug",
+    "access": "/var/log/xray/access.log",
+    "error": "/var/log/xray/error.log"
+  },
   "inbounds": [
     {
       "port": 443,
@@ -44,23 +49,32 @@ sudo tee "$CFG" >/dev/null <<EOF
       "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
     }
   ],
-  "outbounds": [ { "protocol": "freedom" }, { "protocol": "blackhole" } ]
+  "outbounds": [
+    { "protocol": "freedom" },
+    { "protocol": "blackhole" }
+  ]
 }
 EOF
 
-echo "==> Выставляю права на файл…"
-sudo chown root:root "$CFG"
-sudo chmod 644 "$CFG"
+echo "==> Права на файл…"
+chown root:root "$CFG"
+chmod 644 "$CFG"
 
-echo "==> Проверяю JSON…"
+echo "==> Логи для Xray…"
+mkdir -p /var/log/xray
+chown nobody:nogroup /var/log/xray || true
+chmod 755 /var/log/xray
+
+echo "==> Проверка JSON…"
 jq empty "$CFG" >/dev/null
 
-echo "==> Перезапускаю Xray…"
-sudo systemctl restart xray
+echo "==> Перезапуск Xray…"
+systemctl restart xray
 sleep 1
-sudo systemctl status xray --no-pager -l | head -n 20
+systemctl status xray --no-pager -l | head -n 20
 
-echo "==> Проверяю, слушает ли порт 443…"
-ss -tlnp | grep ':443' || (echo '⚠️  443 не слушается' && exit 1)
+echo "==> Проверка, слушает ли 443…"
+ss -tlnp | grep ':443' || (echo '⚠️  Порт 443 не слушается Xray' && exit 1)
 
-echo "✅ Готово."
+echo "==> Последние строки логов Xray:"
+tail -n 50 /var/log/xray/error.log || true
