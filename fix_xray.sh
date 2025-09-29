@@ -1,20 +1,13 @@
 #!/bin/bash
 set -e
 
-# === Константы ===
-UUID="10dad63d-53ac-4136-a725-eb0b75164ed5"
-PRIV="SEqS8SST99euUoBDqVYQYjq-UEoA9EV4oHhNQqsHs"
-PBK="wr6EkbDM_3SDXL_6zh4MPH_aB3Gb1tBU205a2k12kM"
-SID="ebc55ee42cdea080"
-DOMAIN="64.188.64.214"
-SNI="www.google.com"
-XRAY_CONFIG="/usr/local/etc/xray/config.json"
+CONFIG=/usr/local/etc/xray/config.json
+BACKUP=/usr/local/etc/xray/config.json.bak.$(date +%s)
 
-echo "→ Бэкапим $XRAY_CONFIG ..."
-cp $XRAY_CONFIG $XRAY_CONFIG.bak.$(date +%s) || true
+echo "-> Бэкапим $CONFIG в $BACKUP ..."
+cp "$CONFIG" "$BACKUP"
 
-# === Генерируем новый конфиг ===
-cat > $XRAY_CONFIG <<JSON
+cat > "$CONFIG" <<EOF
 {
   "inbounds": [
     {
@@ -23,22 +16,22 @@ cat > $XRAY_CONFIG <<JSON
       "settings": {
         "clients": [
           {
-            "id": "$UUID",
-            "flow": "xtls-rprx-vision",
-            "encryption": "none"
+            "id": "10dad63d-53ac-4136-a725-eb0b75164ed5",
+            "flow": "xtls-rprx-vision"
           }
-        ]
+        ],
+        "decryption": "none"
       },
       "streamSettings": {
         "network": "tcp",
         "security": "reality",
         "realitySettings": {
           "show": false,
-          "dest": "$SNI:443",
+          "dest": "www.google.com:443",
           "xver": 0,
-          "serverNames": ["$SNI"],
-          "privateKey": "$PRIV",
-          "shortIds": ["$SID"]
+          "serverNames": ["www.google.com"],
+          "privateKey": "SEqS85ST599eUloBDqVYQYjq-UEsQ9Ev4oHhNQqsHs",
+          "shortIds": ["ebc55ee42c0dea08"]
         }
       }
     }
@@ -48,28 +41,13 @@ cat > $XRAY_CONFIG <<JSON
     { "protocol": "blackhole", "tag": "blocked" }
   ]
 }
-JSON
+EOF
 
-echo "→ Перезапускаем Xray ..."
+echo "-> Проверяем синтаксис..."
+jq . "$CONFIG" > /dev/null || { echo "Ошибка JSON"; exit 1; }
+
+echo "-> Перезапускаем Xray..."
 systemctl restart xray
 
 sleep 2
-echo "→ Проверяем порт 443:"
-ss -tlnp | grep ":443" || echo "✖ Порт 443 не слушается"
-
-echo
-echo "== Готовые VLESS ссылки =="
-
-echo "с flow:"
-echo "vless://$UUID@$DOMAIN:443?type=tcp&security=reality&encryption=none&fp=chrome&sni=$SNI&pbk=$PBK&sid=$SID&flow=xtls-rprx-vision#Pro100VPN"
-echo
-echo "без flow:"
-echo "vless://$UUID@$DOMAIN:443?type=tcp&security=reality&encryption=none&fp=chrome&sni=$SNI&pbk=$PBK&sid=$SID#Pro100VPN"
-
-echo
-echo "== Deep-link для HappVPN (с flow) =="
-LINK="vless://$UUID@$DOMAIN:443?type=tcp&security=reality&encryption=none&fp=chrome&sni=$SNI&pbk=$PBK&sid=$SID&flow=xtls-rprx-vision#Pro100VPN"
-echo "happ://add/$(python3 -c "import urllib.parse; print(urllib.parse.quote('$LINK'))")"
-
-echo
-echo "✔ Готово."
+systemctl status xray --no-pager -l | head -n 20
