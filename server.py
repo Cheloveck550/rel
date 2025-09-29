@@ -2,20 +2,22 @@ import json
 import sqlite3
 from pathlib import Path
 from typing import Optional, Tuple
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
 app = FastAPI()
 
-DB_FILE = "bot_database.db"
+# Абсолютный путь – чтобы не зависеть от рабочего каталога uvicorn
+DB_FILE = "/root/rel/bot_database.db"
 XRAY_CONFIG = Path("/usr/local/etc/xray/config.json")
 
-# Host в vless:// — адрес твоего сервера, а не SNI
+# Host в vless:// — это адрес твоего сервера (не SNI)
 DOMAIN_OR_IP = "64.188.64.214"
 
-# У тебя derive не сработал — используем override
-PUBLIC_KEY_OVERRIDE: Optional[str] = "m7n-24tMvfTdp2-2sr-vAaM3t9NzGDpTNrva6xM6-ls"
+# У тебя derive через xray x25519 -i не работает, поэтому используем override:
+PUBLIC_KEY_OVERRIDE: Optional[str] = "wr6EkbDM_3SDXL_6Zh4MPH_aB3Gb1IBu2O5a2k12kM"
 
 def db_has_token(token: str) -> bool:
     con = sqlite3.connect(DB_FILE)
@@ -52,7 +54,6 @@ def read_vless_from_config() -> Tuple[str, int, str, str]:
     return uuid, port, sni, short_id
 
 def make_vless(uuid: str, host: str, port: int, sni: str, pbk: str, short_id: str, use_flow: bool) -> str:
-    # ОБЯЗАТЕЛЬНО: encryption=none для Vision
     base = (
         f"vless://{uuid}@{host}:{port}"
         f"?type=tcp&security=reality&encryption=none&fp=chrome"
@@ -67,25 +68,32 @@ async def subs_page(token: str):
     if not db_has_token(token):
         raise HTTPException(status_code=404, detail="Подписка не найдена")
 
-    url_flow   = f"http://{DOMAIN_OR_IP}/sub/{token}?noflow=0"
-    url_noflow = f"http://{DOMAIN_OR_IP}/sub/{token}?noflow=1"
+    uuid, port, sni, short_id = read_vless_from_config()
+    pbk = PUBLIC_KEY_OVERRIDE
+    if not pbk:
+        raise HTTPException(status_code=500, detail="PUBLIC_KEY_OVERRIDE пуст")
+
+    vless_flow   = make_vless(uuid, DOMAIN_OR_IP, port, sni, pbk, short_id, use_flow=True)
+    vless_noflow = make_vless(uuid, DOMAIN_OR_IP, port, sni, pbk, short_id, use_flow=False)
 
     html = f"""
     <html>
       <head><title>Подписка Pro100VPN</title></head>
       <body style="font-family:Arial; text-align:center; margin-top:48px;">
         <h2>Подписка Pro100VPN</h2>
-        <p>Выберите способ добавления в HappVPN:</p>
+        <p>Нажмите для добавления в HappVPN:</p>
         <div style="margin:10px;">
-            <a href="happ://add/{url_flow}">
+            <a href="happ://add/{quote(vless_flow, safe='')}">
                 <button style="padding:10px 18px;">Добавить (с flow)</button>
             </a>
         </div>
         <div style="margin:10px;">
-            <a href="happ://add/{url_noflow}">
+            <a href="happ://add/{quote(vless_noflow, safe='')}">
                 <button style="padding:10px 18px;">Добавить (без flow)</button>
             </a>
         </div>
+        <p style="margin-top:24px;color:#666">Если deep-link не открыл приложение, скопируйте ссылку вручную:</p>
+        <code style="display:block;margin:8px auto;max-width:92%">{vless_flow}</code>
       </body>
     </html>
     """
@@ -101,8 +109,7 @@ async def sub_plain(token: str, noflow: int = Query(0, description="1 — без
     if not pbk:
         raise HTTPException(status_code=500, detail="PUBLIC_KEY_OVERRIDE пуст")
 
-    host = DOMAIN_OR_IP
-    link = make_vless(uuid, host, port, sni, pbk, short_id, use_flow=(noflow != 1))
+    link = make_vless(uuid, DOMAIN_OR_IP, port, sni, pbk, short_id, use_flow=(noflow != 1))
     return PlainTextResponse(link + "\n")
 
 @app.get("/", response_class=PlainTextResponse)
