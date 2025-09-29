@@ -32,8 +32,8 @@ VPN_SUBSCRIPTION_PRICE = 100   # Цена подписки в рублях
 DOMAIN = "64.188.64.214"       # для ссылок вида http://<DOMAIN>/subs/<token>
 
 # Ключи сервера для формирования ссылки vless (PUBLIC KEY и SHORT ID)
-PUBLIC_KEY = "m7n-24tmvfTdp2-Szr-vAaM3t9NzGDpTNrva6xM6-ls"
-SHORT_ID   = "ba4211bb433df45d"
+PUBLIC_KEY = "wr6EkbDM_3SDXL_6Zh4MPH_aB3Gb1IBu2O5a2k12kM"
+SHORT_ID   = "ebc55ee42c0dea08"
 
 DB_PATH = "bot_database.db"             # локально рядом с main.py
 DB_ABS  = "/root/rel/bot_database.db"   # для server.py используем абсолютный путь
