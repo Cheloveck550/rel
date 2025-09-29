@@ -5,7 +5,6 @@ CFG="/usr/local/etc/xray/config.json"
 HOST="64.188.64.214"   # host в ссылке = адрес твоего сервера
 FP="chrome"
 
-# Где xray
 XRAY="/usr/local/bin/xray"
 if ! [ -x "$XRAY" ]; then XRAY="$(command -v xray || true)"; fi
 if ! [ -x "${XRAY:-/nonexistent}" ]; then
@@ -18,16 +17,8 @@ sni=$(jq -r '.inbounds[]|select(.protocol=="vless")|.streamSettings.realitySetti
 sid=$(jq -r '.inbounds[]|select(.protocol=="vless")|.streamSettings.realitySettings.shortIds[0] // .inbounds[]|select(.protocol=="vless")|.streamSettings.realitySettings.shortId' "$CFG")
 priv=$(jq -r '.inbounds[]|select(.protocol=="vless")|.streamSettings.realitySettings.privateKey' "$CFG")
 
-if [[ -z "$uuid" || -z "$port" || -z "$sni" || -z "$sid" || -z "$priv" ]]; then
-  echo "❌ Не удалось извлечь uuid/port/sni/sid/privateKey"; exit 1
-fi
-
 out="$("$XRAY" x25519 -i "$priv" 2>&1 || true)"
 pbk="$(printf '%s\n' "$out" | sed -n 's/.*PublicKey[: ]\s*//p; s/.*Password[: ]\s*//p' | head -n1)"
-if [[ -z "$pbk" ]]; then
-  echo "⚠️ Вывод xray:\n$out"
-  echo "❌ Не удалось извлечь PublicKey/Password"; exit 2
-fi
 
 echo "UUID: $uuid"
 echo "PORT: $port"
