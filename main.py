@@ -3,6 +3,7 @@
 
 import os, json, time, base64, asyncio, secrets, contextlib, uuid, subprocess
 from typing import Optional, Tuple, List
+from urllib.parse import quote
 
 import aiosqlite
 from fastapi import FastAPI, HTTPException
@@ -23,19 +24,19 @@ from yoomoney import Client as YooClient, Quickpay
 from aiocryptopay import AioCryptoPay, Networks
 
 # ===================== Конфигурация =====================
-BOT_TOKEN   = os.getenv("BOT_TOKEN", "CHANGE_ME")  # замени/экспортируй
+BOT_TOKEN   = os.getenv("BOT_TOKEN", "CHANGE_ME")  # задайте через env
 
 DB_PATH     = os.getenv("DB_PATH", "/root/rel/bot_database.db")
 XRAY_CONFIG = os.getenv("XRAY_CONFIG", "/usr/local/etc/xray/config.json")
-XRAY_SERVICE= os.getenv("XRAY_SERVICE", "xray")  # systemd unit name
+XRAY_SERVICE= os.getenv("XRAY_SERVICE", "xray")
 
-PUBLIC_HOST = os.getenv("PUBLIC_HOST", "64.188.64.214")
-# ВАЖНО: все ссылки идут с :8001, пока нет nginx
+PUBLIC_HOST = os.getenv("PUBLIC_HOST", "127.0.0.1")
+# пока nginx нет — все ссылки с :8001
 PUBLIC_BASE = os.getenv("PUBLIC_BASE", f"http://{PUBLIC_HOST}:8001")
 API_HOST    = os.getenv("API_HOST", "0.0.0.0")
 API_PORT    = int(os.getenv("API_PORT", "8001"))
 
-# Цены (руб., фикс)
+# Цены (руб.)
 PRICE_7D  = float(os.getenv("PRICE_7D",  "40"))
 PRICE_1M  = float(os.getenv("PRICE_1M",  "100"))
 PRICE_3M  = float(os.getenv("PRICE_3M",  "270"))
@@ -50,21 +51,19 @@ YOOMONEY_FEE_PERCENT  = float(os.getenv("YOOMONEY_FEE_PERCENT", "0.05"))
 YOOMONEY_WALLET = os.getenv("YOOMONEY_WALLET", "4100118758572112")
 YOOMONEY_TOKEN  = os.getenv("YOOMONEY_TOKEN",  "CHANGE_ME")
 
-# CryptoBot — даём ссылку на @CryptoBot (pay_url от API)
+# CryptoBot
 CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN", "CHANGE_ME")
-CRYPTO_NET   = os.getenv("CRYPTO_NETWORK", "TEST_NET")  # TEST_NET / MAIN_NET
+CRYPTO_NET   = os.getenv("CRYPTO_NETWORK", "TEST_NET")  # TEST_NET | MAIN_NET
 
-# «курсы» для оценки руб. эквивалента (только инфо для текста)
-RUB_PER_TON  = float(os.getenv("RUB_PER_TON",  "350"))
+# «курсы» для инфо/расчёта эквивалента (нам важен только usdt для базы)
 RUB_PER_USDT = float(os.getenv("RUB_PER_USDT", "100"))
-RUB_PER_BTC  = float(os.getenv("RUB_PER_BTC",  "6000000"))
 
 PLANS = {
-    "7d":  {"title": "7 дней",   "days": 7,   "price": PRICE_7D},
-    "1m":  {"title": "1 месяц",  "days": 30,  "price": PRICE_1M},
-    "3m":  {"title": "3 месяца", "days": 90,  "price": PRICE_3M},
-    "6m":  {"title": "6 месяцев","days": 180, "price": PRICE_6M},
-    "12m": {"title": "12 месяцев","days": 365,"price": PRICE_12M},
+    "7d":  {"title": "7 дней",    "days": 7,   "price": PRICE_7D},
+    "1m":  {"title": "1 месяц",   "days": 30,  "price": PRICE_1M},
+    "3m":  {"title": "3 месяца",  "days": 90,  "price": PRICE_3M},
+    "6m":  {"title": "6 месяцев", "days": 180, "price": PRICE_6M},
+    "12m": {"title": "12 месяцев","days": 365, "price": PRICE_12M},
 }
 
 # ===================== База =====================
@@ -100,7 +99,8 @@ CREATE INDEX IF NOT EXISTS idx_pay_user ON payments(user_id);
 async def db_init():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.executescript(SCHEMA_SQL); await db.commit()
+        await db.executescript(SCHEMA_SQL)
+        await db.commit()
 
 async def ensure_user(uid:int, ref_by:Optional[int]=None):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -133,7 +133,7 @@ def pbk_from_private_key(pk_str:str)->str:
     if raw is None:
         with contextlib.suppress(Exception): raw=bytes.fromhex(pk_str)
     if raw is None or len(raw)!=32:
-        raise ValueError("Reality privateKey должен быть 32 байта (base64url). Проверь XRAY_CONFIG.")
+        raise ValueError("Reality privateKey должен быть 32 байта (base64url/hex).")
     priv=x25519.X25519PrivateKey.from_private_bytes(raw)
     pub=priv.public_key().public_bytes(encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
     return _b64u(pub)
@@ -150,7 +150,6 @@ def _reload_xray():
     try:
         subprocess.run(["systemctl","reload",XRAY_SERVICE], check=True)
     except Exception:
-        # fallback: restart
         subprocess.run(["systemctl","restart",XRAY_SERVICE], check=False)
 
 def _get_reality_inbound(data:dict):
@@ -172,13 +171,6 @@ def read_xray_reality()->Tuple[int,str,str,str,str]:
     pk=rs.get("privateKey") or ""
     pbk=pbk_from_private_key(pk) if pk else ""
     return port, network, sni, sid, pbk
-
-def xray_list_clients()->List[str]:
-    data=_load_xray()
-    inbound=_get_reality_inbound(data)
-    if not inbound: return []
-    clients=(inbound.get("settings",{}) or {}).get("clients") or []
-    return [c.get("id","") for c in clients if c.get("id")]
 
 def xray_add_client(new_uuid:str):
     data=_load_xray()
@@ -234,16 +226,15 @@ def text_v2raytun(token)->str:
 
 # ================== выдача/истечение ==================
 async def create_subscription(uid:int, days:int)->str:
-    # генерим уникальный UUID для XRAY
     new_uuid=str(uuid.uuid4())
-    # добавляем в xray
     xray_add_client(new_uuid)
-
     token=secrets.token_urlsafe(24)
     now=int(time.time()); exp=now + days*86400
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR REPLACE INTO subscriptions(token,user_id,uuid,expires_at) VALUES(?,?,?,?)",
-                         (token, uid, new_uuid, exp))
+        await db.execute(
+            "INSERT OR REPLACE INTO subscriptions(token,user_id,uuid,expires_at) VALUES(?,?,?,?)",
+            (token, uid, new_uuid, exp)
+        )
         await db.commit()
     return token
 
@@ -253,7 +244,6 @@ async def get_sub(token:str):
         return await cur.fetchone()
 
 async def expire_gc_loop():
-    # фоновая задача: удаляет истёкшие UUID из xray
     while True:
         try:
             now=int(time.time())
@@ -261,7 +251,6 @@ async def expire_gc_loop():
                 cur=await db.execute("SELECT token, uuid FROM subscriptions WHERE expires_at<=?", (now,))
                 rows=await cur.fetchall()
                 if rows:
-                    # удаляем из xray и очищаем записи (по желанию можно оставлять токены как архив)
                     for tkn, u in rows:
                         xray_remove_client(u)
                     await db.execute("DELETE FROM subscriptions WHERE expires_at<=?", (now,))
@@ -283,7 +272,6 @@ async def sub_plain(token:str):
     uid, user_uuid, exp = int(row[0]), row[1], int(row[2])
     if exp <= int(time.time()):
         raise HTTPException(410, "Subscription expired")
-
     port,network,sni,sid,pbk=read_xray_reality()
     v_no  = build_vless(PUBLIC_HOST,port,user_uuid,network,sni,sid,pbk,False,f"user{uid}-NoFlow")
     v_vis = build_vless(PUBLIC_HOST,port,user_uuid,network,sni,sid,pbk,True ,f"user{uid}-Vision")
@@ -316,7 +304,6 @@ async def subs_page(token:str):
 </div></div></body></html>"""
     return HTMLResponse(html)
 
-from urllib.parse import quote
 @app.get("/v2raytun_import_one/{token}")
 async def v2raytun_import_one(token:str, vision:int=0):
     text=await sub_plain(token); links=text.body.decode().splitlines()
@@ -329,7 +316,8 @@ async def _record_payment(payment_id:str, user_id:int, method:str, plan_id:str, 
         await db.execute(
             "INSERT OR REPLACE INTO payments(payment_id,user_id,method,plan_id,amount,currency,status,meta,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
             (payment_id, user_id, method, plan_id, amount, currency, status, meta, int(time.time()))
-        ); await db.commit()
+        )
+        await db.commit()
 
 async def _credit_referral(user_id:int, net_rub:float):
     ref = await get_referrer(user_id)
@@ -338,7 +326,7 @@ async def _credit_referral(user_id:int, net_rub:float):
         if bonus > 0:
             await add_balance(ref, bonus)
 
-# --- YooMoney (фикс-сумма, label) ---
+# --- YooMoney ---
 def _yoo_make_link(user_id:int, plan_id:str, amount_rub:float)->tuple[str,str]:
     label=f"ym_{user_id}_{plan_id}_{secrets.token_hex(6)}"
     qp=Quickpay(
@@ -358,28 +346,33 @@ async def _yoo_check_paid(label:str)->Optional[float]:
         return None
     return await loop.run_in_executor(None, _check)
 
-# --- CryptoBot: отдаём pay_url → @CryptoBot, пользователь сам выбирает валюту/fiat ---
-async def _cp()->AioCryptoPay:
-    net=Networks.MAIN_NET if CRYPTO_NET.upper()=="MAIN_NET" else Networks.TEST_NET
+# --- CryptoBot: используем bot_invoice_url (ссылка на самого бота) ---
+async def _cp():
+    """Контекстный менеджер клиента CryptoPay."""
+    net = Networks.MAIN_NET if CRYPTO_NET.upper() == "MAIN_NET" else Networks.TEST_NET
     return AioCryptoPay(token=CRYPTO_TOKEN, network=net)
 
-async def _crypto_create_invoice(user_id:int, plan_id:str, amount_rub:float)->tuple[str,str]:
+async def _crypto_create_invoice(user_id: int, plan_id: str, amount_rub: float) -> tuple[str, str]:
     """
-    Создаём инвойс без навязывания актива: pay_url — это ссылка на @CryptoBot.
-    Пользователь сам выбирает USDT/TON/BTC/fiat внутри CryptoBot.
+    Создаём инвойс в USDT (для расчёта суммы). Пользователь внутри @CryptoBot
+    сам выбирает актив/фиат; даём именно bot_invoice_url.
     """
-    cp=await _cp()
-    # создадим “flexible” инвойс в USDT на эквивалент; на стороне @CryptoBot юзер может сменить способ/валюту
-    # берём базовый курс 1 USDT = RUB_PER_USDT:
-    usdt_amt = max(1.0, round(amount_rub / RUB_PER_USDT, 2))
-    inv = await cp.create_invoice(asset="USDT", amount=usdt_amt, description=f"VPN {plan_id} for {user_id}")
-    # inv.pay_url — это t.me/CryptoBot?start=... (открывает именно CryptoBot)
-    return inv.pay_url, str(inv.invoice_id)
+    async with await _cp() as cp:
+        usdt_amt = max(1.0, round(amount_rub / RUB_PER_USDT, 2))
+        inv = await cp.create_invoice(
+            asset="USDT",
+            amount=usdt_amt,
+            description=f"VPN {plan_id} for {user_id}",
+        )
+        url = getattr(inv, "bot_invoice_url", None) or getattr(inv, "pay_url", None)
+        if not url:
+            raise RuntimeError("CryptoBot API не вернул ссылку на инвойс.")
+        return url, str(inv.invoice_id)
 
-async def _crypto_check_paid(invoice_id:str)->bool:
-    cp=await _cp()
-    res=await cp.get_invoices(invoice_ids=[int(invoice_id)])
-    return bool(res.items and res.items[0].status=="paid")
+async def _crypto_check_paid(invoice_id: str) -> bool:
+    async with await _cp() as cp:
+        res = await cp.get_invoices(invoice_ids=[int(invoice_id)])
+        return bool(res.items and res.items[0].status == "paid")
 
 # ===================== Aiogram 3 ========================
 router=Router()
@@ -418,7 +411,6 @@ async def cb_test1d(c:CallbackQuery):
 
 @router.callback_query(lambda c: c.data=="test_2m")
 async def cb_test2m(c:CallbackQuery):
-    # подписка на 2 минуты
     new_uuid=str(uuid.uuid4()); xray_add_client(new_uuid)
     token=secrets.token_urlsafe(24); now=int(time.time()); exp=now+120
     async with aiosqlite.connect(DB_PATH) as db:
@@ -428,7 +420,6 @@ async def cb_test2m(c:CallbackQuery):
     await c.message.answer(text_v2raytun(token), reply_markup=kb_v2raytun(token), disable_web_page_preview=True)
     await c.answer()
 
-# --- покупка тарифов ---
 def plan_keyboard()->InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"7 дней — {PLANS['7d']['price']}₽",   callback_data="buy_plan:7d")],
@@ -442,7 +433,7 @@ def plan_keyboard()->InlineKeyboardMarkup:
 def pay_method_keyboard(plan_id:str)->InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="YooMoney (карта/ЮMoney)", callback_data=f"pay_yoo:{plan_id}")],
-        [InlineKeyboardButton(text="CryptoBot (выбор валюты в @CryptoBot)", callback_data=f"pay_crypto:{plan_id}")],
+        [InlineKeyboardButton(text="CryptoBot (оплата в @CryptoBot)", callback_data=f"pay_crypto:{plan_id}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="buy")],
     ])
 
@@ -477,13 +468,11 @@ async def cb_chk_yoo(c:CallbackQuery):
     paid=await _yoo_check_paid(label)
     if not paid:
         await c.message.answer("Оплата не найдена. Подождите и проверьте ещё раз."); await c.answer(); return
-    # найдём тариф
     async with aiosqlite.connect(DB_PATH) as db:
         cur=await db.execute("SELECT plan_id FROM payments WHERE payment_id=?", (label,))
         row=await cur.fetchone()
     plan_id=row[0] if row else "1m"
     days=PLANS.get(plan_id, {"days":30})["days"]
-    # зачисление рефералки и выдача подписки
     net=round(float(paid)*(1.0-YOOMONEY_FEE_PERCENT),2)
     await _record_payment(label, c.from_user.id, "yoomoney", plan_id, float(paid), "RUB", "credited", "")
     await _credit_referral(c.from_user.id, net_rub=net)
@@ -498,15 +487,13 @@ async def cb_pay_crypto(c:CallbackQuery):
     plan_id=c.data.split(":",1)[1]; plan=PLANS.get(plan_id)
     if not plan: await c.answer("Неизвестный тариф"); return
     pay_url, invoice_id = await _crypto_create_invoice(c.from_user.id, plan_id, plan["price"])
-    # pay_url открывает ИМЕННО @CryptoBot; пользователь там выбирает валюту/fiat сам.
     await _record_payment(invoice_id, c.from_user.id, "crypto", plan_id, plan["price"], "FIAT/CRYPTO", "pending", pay_url)
     kb=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💠 Оплатить в @CryptoBot", url=pay_url)],
         [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"chk_crypto:{invoice_id}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="buy")],
     ])
-    approx=f"≈ {plan['price']}₽ (конвертацию выберешь в @CryptoBot)"
-    await c.message.answer(f"Инвойс создан. {approx}\nПосле оплаты нажми «Проверить оплату».", reply_markup=kb); await c.answer()
+    await c.message.answer("Инвойс создан. После оплаты нажмите «Проверить оплату».", reply_markup=kb); await c.answer()
 
 @router.callback_query(lambda c: c.data and c.data.startswith("chk_crypto:"))
 async def cb_chk_crypto(c:CallbackQuery):
@@ -514,13 +501,11 @@ async def cb_chk_crypto(c:CallbackQuery):
     ok=await _crypto_check_paid(invoice_id)
     if not ok:
         await c.message.answer("Инвойс ещё не оплачен. Проверь позже."); await c.answer(); return
-    # найдём тариф
     async with aiosqlite.connect(DB_PATH) as db:
         cur=await db.execute("SELECT plan_id, user_id FROM payments WHERE payment_id=?", (invoice_id,))
         row=await cur.fetchone()
     plan_id=row[0]; uid=row[1]
     days=PLANS.get(plan_id, {"days":30})["days"]
-    # отмечаем credited, рефералка от фикс-цены тарифа
     await _record_payment(invoice_id, uid, "crypto", plan_id, PLANS[plan_id]["price"], "FIAT/CRYPTO", "credited", "")
     await _credit_referral(uid, net_rub=float(PLANS[plan_id]["price"]))
     token=await create_subscription(uid, days=days)
@@ -541,7 +526,6 @@ async def main():
     if not BOT_TOKEN or BOT_TOKEN=="CHANGE_ME":
         raise SystemExit("Задай BOT_TOKEN через переменные окружения.")
     await db_init()
-    # стартуем фон. сборщик истёкших подписок
     asyncio.create_task(expire_gc_loop())
 
     bot=Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
