@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 
 import os, json, time, base64, asyncio, secrets, contextlib, uuid, subprocess
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
 from urllib.parse import quote
+from decimal import Decimal
 
 import aiosqlite
 from fastapi import FastAPI, HTTPException
@@ -13,13 +14,14 @@ import uvicorn
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives import serialization
 
-from aiogram import Bot, Dispatcher, Router
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram import Bot, Dispatcher, Router, F
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.filters import CommandStart
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.context import FSMContext
 
-# Платежи
 from yoomoney import Client as YooClient, Quickpay
 from aiocryptopay import AioCryptoPay, Networks
 
@@ -31,7 +33,7 @@ XRAY_CONFIG = os.getenv("XRAY_CONFIG", "/usr/local/etc/xray/config.json")
 XRAY_SERVICE= os.getenv("XRAY_SERVICE", "xray")
 
 PUBLIC_HOST = os.getenv("PUBLIC_HOST", "127.0.0.1")
-PUBLIC_BASE = os.getenv("PUBLIC_BASE", f"http://{PUBLIC_HOST}:8001")  # все ссылки с :8001, пока нет nginx
+PUBLIC_BASE = os.getenv("PUBLIC_BASE", f"http://{PUBLIC_HOST}:8001")  # все ссылки, пока нет nginx
 API_HOST    = os.getenv("API_HOST", "0.0.0.0")
 API_PORT    = int(os.getenv("API_PORT", "8001"))
 
@@ -51,9 +53,9 @@ YOOMONEY_WALLET = os.getenv("YOOMONEY_WALLET", "4100118758572112")
 YOOMONEY_TOKEN  = os.getenv("YOOMONEY_TOKEN",  "CHANGE_ME")
 
 # CryptoBot (инвойсы в фиате RUB)
-CRYPTO_TOKEN   = os.getenv("CRYPTO_TOKEN", "CHANGE_ME")
-CRYPTO_NETWORK = os.getenv("CRYPTO_NETWORK", "TEST_NET")  # TEST_NET | MAIN_NET
-CRYPTO_ACCEPTED = os.getenv("CRYPTO_ACCEPTED", "USDT,TON,BTC,ETH,LTC")  # список активов для выбора
+CRYPTO_TOKEN    = os.getenv("CRYPTO_TOKEN", "CHANGE_ME")
+CRYPTO_NETWORK  = os.getenv("CRYPTO_NETWORK", "TEST_NET")  # TEST_NET | MAIN_NET
+CRYPTO_ACCEPTED = os.getenv("CRYPTO_ACCEPTED", "USDT,TON,BTC,ETH,BNB,TRX")  # или "all"
 
 PLANS = {
     "7d":  {"title": "7 дней",    "days": 7,   "price": PRICE_7D},
@@ -82,11 +84,11 @@ CREATE TABLE IF NOT EXISTS referrals (
 CREATE TABLE IF NOT EXISTS payments (
   payment_id TEXT PRIMARY KEY,
   user_id    INTEGER NOT NULL,
-  method     TEXT NOT NULL,   -- 'yoomoney' | 'crypto'
+  method     TEXT NOT NULL,
   plan_id    TEXT,
   amount     REAL NOT NULL,
-  currency   TEXT NOT NULL,   -- 'RUB' | 'FIAT/CRYPTO'
-  status     TEXT NOT NULL,   -- 'pending' | 'credited'
+  currency   TEXT NOT NULL,
+  status     TEXT NOT NULL,
   meta       TEXT,
   created_at INTEGER NOT NULL
 );
@@ -114,6 +116,12 @@ async def add_balance(uid:int, delta:float):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE users SET balance=balance+? WHERE user_id=?", (delta, uid))
         await db.commit()
+
+async def get_balance(uid:int)->float:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur=await db.execute("SELECT balance FROM users WHERE user_id=?", (uid,))
+        row=await cur.fetchone()
+    return float(row[0]) if row else 0.0
 
 async def get_referrer(uid:int)->Optional[int]:
     async with aiosqlite.connect(DB_PATH) as db:
@@ -308,7 +316,7 @@ async def v2raytun_import_one(token:str, vision:int=0):
     return RedirectResponse(f"v2raytun://import/{quote(url, safe='')}")
 
 # ====================== Payments =========================
-async def _record_payment(payment_id:str, user_id:int, method:str, plan_id:str, amount:float, currency:str, status:str, meta:str=""):
+async def _record_payment(payment_id:str, user_id:int, method:str, plan_id:Optional[str], amount:float, currency:str, status:str, meta:str=""):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT OR REPLACE INTO payments(payment_id,user_id,method,plan_id,amount,currency,status,meta,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -343,34 +351,47 @@ async def _yoo_check_paid(label:str)->Optional[float]:
         return None
     return await loop.run_in_executor(None, _check)
 
-# --- CryptoBot (инвойс в RUB, выбор любой валюты в @CryptoBot) ---
+# --- CryptoBot общие ---
 def _cp_net():
     return Networks.MAIN_NET if CRYPTO_NETWORK.upper()=="MAIN_NET" else Networks.TEST_NET
 
-async def _crypto_create_invoice(user_id: int, plan_id: str, amount_rub: float) -> tuple[str, str]:
-    """
-    Создаём инвойс в RUB (fiat). Пользователь в @CryptoBot сам выберет актив (USDT/TON/BTC/ETH/LTC и т.д.)
-    и оплатит точную сумму в рублях. Возвращаем bot_invoice_url — ссылка откроет именно @CryptoBot.
-    """
-    assets = [a.strip().upper() for a in CRYPTO_ACCEPTED.split(",") if a.strip()]
+def _accepted_assets():
+    s = CRYPTO_ACCEPTED.strip()
+    if not s or s.lower()=="all":
+        return "all"
+    return [a.strip().upper() for a in s.split(",") if a.strip()]
+
+async def _crypto_create_invoice_fiat(amount_rub: float, description: str, accepted: List[str] | str, swap_to: Optional[str]=None):
+    """Создаёт фиат-инвойс в RUB. Если swap_to не поддерживается — тихо повторяет без него."""
     async with AioCryptoPay(token=CRYPTO_TOKEN, network=_cp_net()) as cp:
-        inv = await cp.create_invoice(
-            amount=float(amount_rub),
-            fiat="RUB",
-            accepted_assets=assets or "all",
-            description=f"VPN {plan_id} for {user_id}",
-            allow_anonymous=True,
-            allow_comments=True,
-        )
+        try:
+            inv = await cp.create_invoice(
+                amount=float(amount_rub),
+                fiat="RUB",
+                accepted_assets=accepted,
+                description=description,
+                allow_anonymous=True,
+                allow_comments=True,
+                swap_to=swap_to  # может не поддерживаться в некоторых сборках — обработаем ниже
+            )
+        except TypeError:
+            # если библиотека без параметра swap_to
+            inv = await cp.create_invoice(
+                amount=float(amount_rub),
+                fiat="RUB",
+                accepted_assets=accepted,
+                description=description,
+                allow_anonymous=True,
+                allow_comments=True,
+            )
         url = getattr(inv, "bot_invoice_url", None) or getattr(inv, "pay_url", None)
         if not url:
-            raise RuntimeError("CryptoBot API не вернул ссылку на инвойс.")
-        return url, str(inv.invoice_id)
+            raise RuntimeError("CryptoBot не вернул ссылку на инвойс.")
+        return inv, url
 
 async def _crypto_check_paid(invoice_id: str) -> bool:
     async with AioCryptoPay(token=CRYPTO_TOKEN, network=_cp_net()) as cp:
         res = await cp.get_invoices(invoice_ids=[int(invoice_id)])
-        # В твоей версии это список:
         if isinstance(res, list):
             inv = res[0] if res else None
         else:
@@ -380,12 +401,17 @@ async def _crypto_check_paid(invoice_id: str) -> bool:
 # ===================== Aiogram 3 ========================
 router=Router()
 
+class PaymentState(StatesGroup):
+    waiting_for_currency_selection = State()
+    waiting_for_cryptobot_amount   = State()
+
 def main_menu()->InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🧪 Тест 1 день", callback_data="test_sub")],
         [InlineKeyboardButton(text="⏱ Тест 2 минуты", callback_data="test_2m")],
         [InlineKeyboardButton(text="🛒 Купить подписку", callback_data="buy")],
         [InlineKeyboardButton(text="💼 Баланс", callback_data="balance")],
+        [InlineKeyboardButton(text="💳 Пополнить баланс (CryptoBot)", callback_data="topup_crypto")],
     ])
 
 @router.message(CommandStart())
@@ -400,10 +426,7 @@ async def cmd_start(m:Message):
 
 @router.callback_query(lambda c: c.data=="balance")
 async def cb_balance(c:CallbackQuery):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur=await db.execute("SELECT balance FROM users WHERE user_id=?", (c.from_user.id,))
-        row=await cur.fetchone()
-    bal=float(row[0]) if row else 0.0
+    bal=await get_balance(c.from_user.id)
     await c.message.answer(f"Баланс: <b>{bal:.2f}₽</b>"); await c.answer()
 
 @router.callback_query(lambda c: c.data=="test_sub")
@@ -436,7 +459,7 @@ def plan_keyboard()->InlineKeyboardMarkup:
 def pay_method_keyboard(plan_id:str)->InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="YooMoney (карта/ЮMoney)", callback_data=f"pay_yoo:{plan_id}")],
-        [InlineKeyboardButton(text="CryptoBot (оплата в @CryptoBot)", callback_data=f"pay_crypto:{plan_id}")],
+        [InlineKeyboardButton(text="CryptoBot (инвойс в ₽)",   callback_data=f"pay_crypto:{plan_id}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="buy")],
     ])
 
@@ -451,7 +474,7 @@ async def cb_buy_plan(c:CallbackQuery):
     await c.message.answer(f"Тариф <b>{plan['title']}</b> — <b>{plan['price']}₽</b>\nВыберите способ оплаты:",
                            reply_markup=pay_method_keyboard(plan_id)); await c.answer()
 
-# ---- YooMoney ----
+# ---- YooMoney подписка ----
 @router.callback_query(lambda c: c.data and c.data.startswith("pay_yoo:"))
 async def cb_pay_yoo(c:CallbackQuery):
     plan_id=c.data.split(":",1)[1]; plan=PLANS.get(plan_id)
@@ -484,19 +507,26 @@ async def cb_chk_yoo(c:CallbackQuery):
     await c.message.answer(text_v2raytun(token), reply_markup=kb_v2raytun(token), disable_web_page_preview=True)
     await c.answer()
 
-# ---- CryptoBot (fiat RUB + выбор актива в боте) ----
+# ---- CryptoBot подписка (фиат) ----
 @router.callback_query(lambda c: c.data and c.data.startswith("pay_crypto:"))
 async def cb_pay_crypto(c:CallbackQuery):
     plan_id=c.data.split(":",1)[1]; plan=PLANS.get(plan_id)
     if not plan: await c.answer("Неизвестный тариф"); return
-    pay_url, invoice_id = await _crypto_create_invoice(c.from_user.id, plan_id, plan["price"])
-    await _record_payment(invoice_id, c.from_user.id, "crypto", plan_id, plan["price"], "FIAT/CRYPTO", "pending", pay_url)
+    accepted=_accepted_assets()
+    inv, pay_url = await _crypto_create_invoice_fiat(
+        amount_rub=plan["price"],
+        description=f"VPN {plan_id} for {c.from_user.id}",
+        accepted=accepted,
+        swap_to=None  # для покупки подписки конвертация не требуется
+    )
+    await _record_payment(str(inv.invoice_id), c.from_user.id, "crypto", plan_id, plan["price"], "FIAT/CRYPTO", "pending", pay_url)
     kb=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💠 Оплатить в @CryptoBot", url=pay_url)],
-        [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"chk_crypto:{invoice_id}")],
+        [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"chk_crypto:{inv.invoice_id}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="buy")],
     ])
-    await c.message.answer("Инвойс создан в RUB. В @CryptoBot выберите удобную валюту/способ и оплатите, затем нажмите «Проверить оплату».", reply_markup=kb); await c.answer()
+    await c.message.answer("Инвойс создан в ₽. В @CryptoBot выберите удобную валюту, оплатите и нажмите «Проверить оплату».",
+                           reply_markup=kb); await c.answer()
 
 @router.callback_query(lambda c: c.data and c.data.startswith("chk_crypto:"))
 async def cb_chk_crypto(c:CallbackQuery):
@@ -505,16 +535,105 @@ async def cb_chk_crypto(c:CallbackQuery):
     if not ok:
         await c.message.answer("Инвойс ещё не оплачен. Проверь позже."); await c.answer(); return
     async with aiosqlite.connect(DB_PATH) as db:
-        cur=await db.execute("SELECT plan_id, user_id FROM payments WHERE payment_id=?", (invoice_id,))
+        cur=await db.execute("SELECT plan_id, user_id, amount FROM payments WHERE payment_id=?", (invoice_id,))
         row=await cur.fetchone()
-    plan_id=row[0]; uid=row[1]
+    plan_id=row[0]; uid=row[1]; amount=float(row[2])
     days=PLANS.get(plan_id, {"days":30})["days"]
-    await _record_payment(invoice_id, uid, "crypto", plan_id, PLANS[plan_id]["price"], "FIAT/CRYPTO", "credited", "")
-    await _credit_referral(uid, net_rub=float(PLANS[plan_id]["price"]))
+    await _record_payment(invoice_id, uid, "crypto", plan_id, amount, "FIAT/CRYPTO", "credited", "")
+    await _credit_referral(uid, net_rub=amount)
     token=await create_subscription(uid, days=days)
     await c.message.answer(f"Оплата через @CryptoBot получена.\nВыдана подписка на {days} дней.")
     await c.message.answer(text_v2raytun(token), reply_markup=kb_v2raytun(token), disable_web_page_preview=True)
     await c.answer()
+
+# ================== Пополнение баланса через CryptoBot (с выбором валюты) ===========
+def currency_keyboard()->InlineKeyboardMarkup:
+    assets = _accepted_assets()
+    buttons = []
+    if assets == "all":
+        choices = ["USDT","TON","BTC","ETH","BNB","TRX"]
+    else:
+        choices = assets
+    row=[]
+    for a in choices:
+        row.append(InlineKeyboardButton(text=a, callback_data=f"currency_{a}"))
+        if len(row)==3:
+            buttons.append(row); row=[]
+    if row: buttons.append(row)
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+@router.callback_query(lambda c: c.data=="topup_crypto")
+async def cb_topup_crypto(c:CallbackQuery, state:FSMContext):
+    await state.set_state(PaymentState.waiting_for_currency_selection)
+    await c.message.answer("Выберите валюту, в которую будут сконвертированы средства после оплаты в @CryptoBot:",
+                           reply_markup=currency_keyboard())
+    await c.answer()
+
+@router.callback_query(F.data.startswith("currency_"), PaymentState.waiting_for_currency_selection)
+async def select_currency(callback: CallbackQuery, state: FSMContext):
+    currency = callback.data.split("_",1)[1]
+    await state.update_data(selected_currency=currency)
+    kb=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Назад")]], resize_keyboard=True)
+    await callback.message.answer(
+        f"Вы выбрали {currency}.\nВведите сумму пополнения в рублях (минимум 100):",
+        reply_markup=kb
+    )
+    await state.set_state(PaymentState.waiting_for_cryptobot_amount)
+    await callback.answer()
+
+@router.message(PaymentState.waiting_for_cryptobot_amount)
+async def process_cryptopay_payment(message: Message, state: FSMContext):
+    if message.text.strip().lower()=="назад":
+        await state.clear()
+        await message.answer("Возвращаю в меню.", reply_markup=main_menu())
+        return
+    try:
+        data = await state.get_data()
+        target_currency = data.get("selected_currency", "USDT")
+        amount = Decimal(message.text.replace(',', '.'))
+        if amount <= 0: raise ValueError("Сумма должна быть положительной.")
+        if amount < 100: raise ValueError("Минимальная сумма пополнения — 100 ₽.")
+        accepted=_accepted_assets()
+        # создаём фиат-инвойс и просим CryptoBot конвертировать в выбранную валюту после оплаты
+        inv, pay_url = await _crypto_create_invoice_fiat(
+            amount_rub=float(amount),
+            description="Пополнение баланса",
+            accepted=accepted,
+            swap_to=target_currency
+        )
+        await _record_payment(str(inv.invoice_id), message.from_user.id, "crypto", None, float(amount), "FIAT/CRYPTO", "pending", pay_url)
+        kb=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_cryptopay_payment:{inv.invoice_id}")
+        ]])
+        await message.answer(
+            f"💳 Ссылка для оплаты (инвойс в ₽, оплата в @CryptoBot):\n{pay_url}\n\n"
+            f"После оплаты средства будут сконвертированы в {target_currency}.",
+            reply_markup=kb
+        )
+    except Exception as e:
+        await state.clear()
+        await message.answer(f"⚠️ Ошибка: {e}\nВозврат в меню.", reply_markup=main_menu())
+
+@router.callback_query(F.data.startswith("check_cryptopay_payment:"))
+async def check_cryptopay_payment(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("⌛ Проверяю оплату…")
+    invoice_id = callback.data.split(":",1)[1]
+    ok = await _crypto_check_paid(invoice_id)
+    if not ok:
+        await callback.message.answer("⌛ Платёж ещё не найден. Подождите и проверьте ещё раз.")
+        return
+    # зачесть баланс и рефералку
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur=await db.execute("SELECT amount FROM payments WHERE payment_id=?", (invoice_id,))
+        row=await cur.fetchone()
+    pay_amount=float(row[0]) if row else 0.0
+    await _record_payment(invoice_id, callback.from_user.id, "crypto", None, pay_amount, "FIAT/CRYPTO", "credited", "")
+    await add_balance(callback.from_user.id, pay_amount)
+    await _credit_referral(callback.from_user.id, net_rub=pay_amount)
+    bal=await get_balance(callback.from_user.id)
+    await callback.message.answer(f"✅ Оплата получена. Баланс пополнен на {pay_amount:.2f} ₽.\nТекущий баланс: {bal:.2f} ₽",
+                                  reply_markup=main_menu())
 
 @router.callback_query(lambda c: c.data=="menu")
 async def cb_menu(c:CallbackQuery):
