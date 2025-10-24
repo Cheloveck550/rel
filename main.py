@@ -24,15 +24,14 @@ from yoomoney import Client as YooClient, Quickpay
 from aiocryptopay import AioCryptoPay, Networks
 
 # ===================== Конфигурация =====================
-BOT_TOKEN   = os.getenv("BOT_TOKEN", "CHANGE_ME")  # задайте через env
+BOT_TOKEN   = os.getenv("BOT_TOKEN", "CHANGE_ME")
 
 DB_PATH     = os.getenv("DB_PATH", "/root/rel/bot_database.db")
 XRAY_CONFIG = os.getenv("XRAY_CONFIG", "/usr/local/etc/xray/config.json")
 XRAY_SERVICE= os.getenv("XRAY_SERVICE", "xray")
 
 PUBLIC_HOST = os.getenv("PUBLIC_HOST", "127.0.0.1")
-# пока nginx нет — все ссылки с :8001
-PUBLIC_BASE = os.getenv("PUBLIC_BASE", f"http://{PUBLIC_HOST}:8001")
+PUBLIC_BASE = os.getenv("PUBLIC_BASE", f"http://{PUBLIC_HOST}:8001")  # все ссылки с :8001, пока нет nginx
 API_HOST    = os.getenv("API_HOST", "0.0.0.0")
 API_PORT    = int(os.getenv("API_PORT", "8001"))
 
@@ -51,12 +50,10 @@ YOOMONEY_FEE_PERCENT  = float(os.getenv("YOOMONEY_FEE_PERCENT", "0.05"))
 YOOMONEY_WALLET = os.getenv("YOOMONEY_WALLET", "4100118758572112")
 YOOMONEY_TOKEN  = os.getenv("YOOMONEY_TOKEN",  "CHANGE_ME")
 
-# CryptoBot
-CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN", "CHANGE_ME")
-CRYPTO_NET   = os.getenv("CRYPTO_NETWORK", "TEST_NET")  # TEST_NET | MAIN_NET
-
-# «курсы» для инфо/расчёта эквивалента (нам важен только usdt для базы)
-RUB_PER_USDT = float(os.getenv("RUB_PER_USDT", "100"))
+# CryptoBot (инвойсы в фиате RUB)
+CRYPTO_TOKEN   = os.getenv("CRYPTO_TOKEN", "CHANGE_ME")
+CRYPTO_NETWORK = os.getenv("CRYPTO_NETWORK", "TEST_NET")  # TEST_NET | MAIN_NET
+CRYPTO_ACCEPTED = os.getenv("CRYPTO_ACCEPTED", "USDT,TON,BTC,ETH,LTC")  # список активов для выбора
 
 PLANS = {
     "7d":  {"title": "7 дней",    "days": 7,   "price": PRICE_7D},
@@ -346,23 +343,24 @@ async def _yoo_check_paid(label:str)->Optional[float]:
         return None
     return await loop.run_in_executor(None, _check)
 
-# --- CryptoBot: используем bot_invoice_url (ссылка на самого бота) ---
-async def _cp():
-    """Контекстный менеджер клиента CryptoPay."""
-    net = Networks.MAIN_NET if CRYPTO_NET.upper() == "MAIN_NET" else Networks.TEST_NET
-    return AioCryptoPay(token=CRYPTO_TOKEN, network=net)
+# --- CryptoBot (инвойс в RUB, выбор любой валюты в @CryptoBot) ---
+def _cp_net():
+    return Networks.MAIN_NET if CRYPTO_NETWORK.upper()=="MAIN_NET" else Networks.TEST_NET
 
 async def _crypto_create_invoice(user_id: int, plan_id: str, amount_rub: float) -> tuple[str, str]:
     """
-    Создаём инвойс в USDT (для расчёта суммы). Пользователь внутри @CryptoBot
-    сам выбирает актив/фиат; даём именно bot_invoice_url.
+    Создаём инвойс в RUB (fiat). Пользователь в @CryptoBot сам выберет актив (USDT/TON/BTC/ETH/LTC и т.д.)
+    и оплатит точную сумму в рублях. Возвращаем bot_invoice_url — ссылка откроет именно @CryptoBot.
     """
-    async with await _cp() as cp:
-        usdt_amt = max(1.0, round(amount_rub / RUB_PER_USDT, 2))
+    assets = [a.strip().upper() for a in CRYPTO_ACCEPTED.split(",") if a.strip()]
+    async with AioCryptoPay(token=CRYPTO_TOKEN, network=_cp_net()) as cp:
         inv = await cp.create_invoice(
-            asset="USDT",
-            amount=usdt_amt,
+            amount=float(amount_rub),
+            fiat="RUB",
+            accepted_assets=assets or "all",
             description=f"VPN {plan_id} for {user_id}",
+            allow_anonymous=True,
+            allow_comments=True,
         )
         url = getattr(inv, "bot_invoice_url", None) or getattr(inv, "pay_url", None)
         if not url:
@@ -370,9 +368,14 @@ async def _crypto_create_invoice(user_id: int, plan_id: str, amount_rub: float) 
         return url, str(inv.invoice_id)
 
 async def _crypto_check_paid(invoice_id: str) -> bool:
-    async with await _cp() as cp:
+    async with AioCryptoPay(token=CRYPTO_TOKEN, network=_cp_net()) as cp:
         res = await cp.get_invoices(invoice_ids=[int(invoice_id)])
-        return bool(res.items and res.items[0].status == "paid")
+        # В твоей версии это список:
+        if isinstance(res, list):
+            inv = res[0] if res else None
+        else:
+            inv = res.items[0] if getattr(res, "items", None) else None
+        return bool(inv and getattr(inv, "status", None) == "paid")
 
 # ===================== Aiogram 3 ========================
 router=Router()
@@ -481,7 +484,7 @@ async def cb_chk_yoo(c:CallbackQuery):
     await c.message.answer(text_v2raytun(token), reply_markup=kb_v2raytun(token), disable_web_page_preview=True)
     await c.answer()
 
-# ---- CryptoBot ----
+# ---- CryptoBot (fiat RUB + выбор актива в боте) ----
 @router.callback_query(lambda c: c.data and c.data.startswith("pay_crypto:"))
 async def cb_pay_crypto(c:CallbackQuery):
     plan_id=c.data.split(":",1)[1]; plan=PLANS.get(plan_id)
@@ -493,7 +496,7 @@ async def cb_pay_crypto(c:CallbackQuery):
         [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"chk_crypto:{invoice_id}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="buy")],
     ])
-    await c.message.answer("Инвойс создан. После оплаты нажмите «Проверить оплату».", reply_markup=kb); await c.answer()
+    await c.message.answer("Инвойс создан в RUB. В @CryptoBot выберите удобную валюту/способ и оплатите, затем нажмите «Проверить оплату».", reply_markup=kb); await c.answer()
 
 @router.callback_query(lambda c: c.data and c.data.startswith("chk_crypto:"))
 async def cb_chk_crypto(c:CallbackQuery):
